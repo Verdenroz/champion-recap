@@ -92,10 +92,10 @@ async function getAllMatchIdsForYear(puuid: string, region: string, year: number
 }
 
 /**
- * Check if match exists in S3
+ * Check if match exists in S3 for a specific player
  */
-async function matchExistsInS3(matchId: string): Promise<boolean> {
-	const key = `matches/${matchId}.json`;
+async function matchExistsInS3(matchId: string, puuid: string): Promise<boolean> {
+	const key = `matches/${puuid}/${matchId}.json`;
 
 	try {
 		await s3Client.send(new HeadObjectCommand({
@@ -109,9 +109,9 @@ async function matchExistsInS3(matchId: string): Promise<boolean> {
 }
 
 /**
- * Check which matches are already cached
+ * Check which matches are already cached for a specific player
  */
-async function filterUncachedMatches(matchIds: string[]): Promise<{ cached: string[], uncached: string[] }> {
+async function filterUncachedMatches(matchIds: string[], puuid: string): Promise<{ cached: string[], uncached: string[] }> {
 	const cached: string[] = [];
 	const uncached: string[] = [];
 
@@ -123,7 +123,7 @@ async function filterUncachedMatches(matchIds: string[]): Promise<{ cached: stri
 		const results = await Promise.all(
 			batch.map(async (matchId) => ({
 				matchId,
-				exists: await matchExistsInS3(matchId)
+				exists: await matchExistsInS3(matchId, puuid)
 			}))
 		);
 
@@ -277,7 +277,7 @@ export async function handler(event: FetchMatchesEvent) {
 
 		// Step 4: Filter out cached matches
 		console.log('Checking S3 cache...');
-		const { cached, uncached } = await filterUncachedMatches(matchIds);
+		const { cached, uncached } = await filterUncachedMatches(matchIds, puuid);
 		console.log(`Cached: ${cached.length}, Need to fetch: ${uncached.length}`);
 
 		// Step 5: Update player status to PROCESSING

@@ -62,10 +62,10 @@ async function getMatchById(matchId: string, region: string, maxRetries = 3): Pr
 }
 
 /**
- * Save match data to S3
+ * Save match data to S3 (player-specific path)
  */
-async function saveMatchToS3(matchId: string, matchData: any) {
-	const key = `matches/${matchId}.json`;
+async function saveMatchToS3(matchId: string, matchData: any, puuid: string) {
+	const key = `matches/${puuid}/${matchId}.json`;
 	const command = new PutObjectCommand({
 		Bucket: MATCH_DATA_BUCKET,
 		Key: key,
@@ -184,7 +184,7 @@ async function processRecord(record: SQSRecord) {
 		}
 
 		// Save to S3
-		await saveMatchToS3(matchId, matchData);
+		await saveMatchToS3(matchId, matchData, puuid);
 
 		// Increment processed counter
 		const processedMatches = await incrementProcessedMatches(puuid, year);

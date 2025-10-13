@@ -21,8 +21,8 @@ interface AggregateStatsEvent {
 /**
  * Fetch match data from S3
  */
-async function fetchMatchFromS3(matchId: string): Promise<MatchDto> {
-	const key = `matches/${matchId}.json`;
+async function fetchMatchFromS3(matchId: string, puuid: string): Promise<MatchDto> {
+	const key = `matches/${puuid}/${matchId}.json`;
 	const command = new GetObjectCommand({
 		Bucket: MATCH_DATA_BUCKET,
 		Key: key
@@ -34,16 +34,16 @@ async function fetchMatchFromS3(matchId: string): Promise<MatchDto> {
 }
 
 /**
- * Get all match IDs from S3 (list all matches in the bucket)
+ * Get all match IDs from S3 for a specific player
  */
-async function getAllMatchIdsFromS3(): Promise<string[]> {
+async function getPlayerMatchIdsFromS3(puuid: string): Promise<string[]> {
 	const matchIds: string[] = [];
 	let continuationToken: string | undefined;
 
 	do {
 		const command = new ListObjectsV2Command({
 			Bucket: MATCH_DATA_BUCKET,
-			Prefix: 'matches/',
+			Prefix: `matches/${puuid}/`,
 			ContinuationToken: continuationToken
 		});
 
@@ -52,8 +52,9 @@ async function getAllMatchIdsFromS3(): Promise<string[]> {
 		if (response.Contents) {
 			for (const object of response.Contents) {
 				if (object.Key) {
-					// Extract match ID from key: matches/NA1_1234567890.json -> NA1_1234567890
-					const matchId = object.Key.replace('matches/', '').replace('.json', '');
+					// Extract match ID from key: matches/{puuid}/NA1_1234567890.json -> NA1_1234567890
+					const parts = object.Key.split('/');
+					const matchId = parts[parts.length - 1].replace('.json', '');
 					matchIds.push(matchId);
 				}
 			}
@@ -92,18 +93,18 @@ export async function handler(event: AggregateStatsEvent) {
 	try {
 		const { puuid, year } = event;
 
-		// Get all match IDs from S3
-		const matchIds = await getAllMatchIdsFromS3();
+		// Get all match IDs from S3 for this player
+		const matchIds = await getPlayerMatchIdsFromS3(puuid);
 
 		if (matchIds.length === 0) {
-			console.log('No matches found in S3');
+			console.log('No matches found in S3 for player:', puuid);
 			return {
 				statusCode: 404,
 				body: JSON.stringify({ error: 'No matches found' })
 			};
 		}
 
-		console.log(`Found ${matchIds.length} total matches in S3`);
+		console.log(`Found ${matchIds.length} matches for player ${puuid}`);
 
 		// Fetch matches from S3 in parallel (batches of 50)
 		const matches: MatchDto[] = [];
@@ -113,7 +114,7 @@ export async function handler(event: AggregateStatsEvent) {
 			const batch = matchIds.slice(i, i + batchSize);
 			const batchMatches = await Promise.all(
 				batch.map(matchId =>
-					fetchMatchFromS3(matchId).catch(err => {
+					fetchMatchFromS3(matchId, puuid).catch(err => {
 						console.error(`Failed to fetch match ${matchId}:`, err);
 						return null;
 					})

@@ -131,7 +131,8 @@ export class ChampionRecapStack extends cdk.Stack {
 			environment: {
 				PLAYER_TABLE: playerTable.tableName,
 				CHAMPION_STATS_TABLE: championStatsTable.tableName,
-				FETCH_MATCHES_FUNCTION_ARN: fetchMatchesFunction.functionArn
+				FETCH_MATCHES_FUNCTION_ARN: fetchMatchesFunction.functionArn,
+				RIOT_API_KEY: process.env.RIOT_API_KEY || ''
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
@@ -214,6 +215,9 @@ export class ChampionRecapStack extends cdk.Stack {
 
 		const recap = player.addResource('recap');
 		recap.addMethod('GET', apiIntegration); // GET /player/recap?puuid=X&year=2025
+
+		const status = player.addResource('status');
+		status.addMethod('GET', apiIntegration); // GET /player/status?puuid=X&year=2025
 
 		// ===================================
 		// Outputs

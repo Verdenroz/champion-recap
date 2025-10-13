@@ -31,7 +31,31 @@ async function getPlayerRecap(puuid: string, year: number) {
 }
 
 /**
- * Trigger match fetching for a player
+ * Get PUUID from Riot API
+ */
+async function getPuuidFromRiot(gameName: string, tagLine: string, region: string): Promise<string> {
+	const url = `https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`;
+
+	const response = await fetch(url, {
+		headers: { 'X-Riot-Token': process.env.RIOT_API_KEY || '' }
+	});
+
+	if (!response.ok) {
+		if (response.status === 429) {
+			throw new Error('RATE_LIMITED');
+		}
+		if (response.status === 404) {
+			throw new Error('PLAYER_NOT_FOUND');
+		}
+		throw new Error(`Failed to fetch account: ${response.status}`);
+	}
+
+	const data = await response.json() as { puuid: string };
+	return data.puuid;
+}
+
+/**
+ * Trigger match fetching for a player (async)
  */
 async function triggerMatchFetch(gameName: string, tagLine: string, platform: string, region: string, year: number) {
 	const payload = {
@@ -89,17 +113,49 @@ export async function handler(event: APIGatewayEvent) {
 
 			const currentYear = year ? parseInt(year) : new Date().getFullYear();
 
-			// Trigger async match fetching
-			await triggerMatchFetch(gameName, tagLine, platform, region, currentYear);
+			try {
+				// Get PUUID from Riot API (fast)
+				const puuid = await getPuuidFromRiot(gameName, tagLine, region);
 
-			return {
-				statusCode: 202,
-				headers: corsHeaders,
-				body: JSON.stringify({
-					message: 'Processing started',
-					status: 'PENDING'
-				})
-			};
+				// Trigger match fetching asynchronously (don't wait)
+				await triggerMatchFetch(gameName, tagLine, platform, region, currentYear);
+
+				return {
+					statusCode: 202,
+					headers: corsHeaders,
+					body: JSON.stringify({
+						message: 'Processing started',
+						status: 'PENDING',
+						puuid: puuid
+					})
+				};
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+
+				if (errorMessage === 'RATE_LIMITED') {
+					return {
+						statusCode: 429,
+						headers: corsHeaders,
+						body: JSON.stringify({
+							error: 'Rate limited by Riot API',
+							message: 'Too many requests. Please try again in a few seconds.'
+						})
+					};
+				}
+
+				if (errorMessage === 'PLAYER_NOT_FOUND') {
+					return {
+						statusCode: 404,
+						headers: corsHeaders,
+						body: JSON.stringify({
+							error: 'Player not found',
+							message: 'Could not find a player with that game name and tag line.'
+						})
+					};
+				}
+
+				throw error; // Re-throw other errors to be caught by outer handler
+			}
 		}
 
 		// Route: GET /player/recap - Get player recap
@@ -130,6 +186,48 @@ export async function handler(event: APIGatewayEvent) {
 				statusCode: 200,
 				headers: corsHeaders,
 				body: JSON.stringify(recap)
+			};
+		}
+
+		// Route: GET /player/status - Get player processing status
+		if (event.path === '/player/status' && event.httpMethod === 'GET') {
+			const { puuid, year } = params;
+
+			if (!puuid) {
+				return {
+					statusCode: 400,
+					headers: corsHeaders,
+					body: JSON.stringify({ error: 'puuid is required' })
+				};
+			}
+
+			const currentYear = year ? parseInt(year) : new Date().getFullYear();
+
+			const command = new GetCommand({
+				TableName: PLAYER_TABLE,
+				Key: { puuid, year: currentYear }
+			});
+
+			const response = await docClient.send(command);
+
+			if (!response.Item) {
+				return {
+					statusCode: 404,
+					headers: corsHeaders,
+					body: JSON.stringify({ error: 'Player not found' })
+				};
+			}
+
+			return {
+				statusCode: 200,
+				headers: corsHeaders,
+				body: JSON.stringify({
+					puuid: response.Item.puuid,
+					status: response.Item.status,
+					totalMatches: response.Item.totalMatches,
+					processedMatches: response.Item.processedMatches,
+					lastUpdated: response.Item.lastUpdated
+				})
 			};
 		}
 

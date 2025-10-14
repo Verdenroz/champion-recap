@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 
 const dynamoClient = new DynamoDBClient({});
@@ -31,9 +31,9 @@ async function getPlayerRecap(puuid: string, year: number) {
 }
 
 /**
- * Get PUUID from Riot API
+ * Get account data from Riot API
  */
-async function getPuuidFromRiot(gameName: string, tagLine: string, region: string): Promise<string> {
+async function getAccountFromRiot(gameName: string, tagLine: string, region: string): Promise<any> {
 	const url = `https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`;
 
 	const response = await fetch(url, {
@@ -50,8 +50,58 @@ async function getPuuidFromRiot(gameName: string, tagLine: string, region: strin
 		throw new Error(`Failed to fetch account: ${response.status}`);
 	}
 
-	const data = await response.json() as { puuid: string };
-	return data.puuid;
+	return response.json();
+}
+
+/**
+ * Get summoner data from Riot API
+ */
+async function getSummonerByPuuid(puuid: string, platform: string): Promise<any> {
+	const url = `https://${platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${puuid}`;
+
+	const response = await fetch(url, {
+		headers: { 'X-Riot-Token': process.env.RIOT_API_KEY || '' }
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch summoner: ${response.status}`);
+	}
+
+	return response.json();
+}
+
+/**
+ * Get ranked league entries from Riot API
+ */
+async function getRankedLeagueEntries(summonerId: string, platform: string): Promise<any> {
+	const url = `https://${platform}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerId}`;
+
+	const response = await fetch(url, {
+		headers: { 'X-Riot-Token': process.env.RIOT_API_KEY || '' }
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch ranked entries: ${response.status}`);
+	}
+
+	return response.json();
+}
+
+/**
+ * Get top champion mastery from Riot API
+ */
+async function getTopChampionMastery(puuid: string, platform: string, count: number = 3): Promise<any> {
+	const url = `https://${platform}.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/${puuid}/top?count=${count}`;
+
+	const response = await fetch(url, {
+		headers: { 'X-Riot-Token': process.env.RIOT_API_KEY || '' }
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch champion mastery: ${response.status}`);
+	}
+
+	return response.json();
 }
 
 /**
@@ -114,19 +164,37 @@ export async function handler(event: APIGatewayEvent) {
 			const currentYear = year ? parseInt(year) : new Date().getFullYear();
 
 			try {
-				// Get PUUID from Riot API (fast)
-				const puuid = await getPuuidFromRiot(gameName, tagLine, region);
+				// Step 1: Get account from Riot API
+				const account = await getAccountFromRiot(gameName, tagLine, region);
+				const puuid = account.puuid;
 
-				// Trigger match fetching asynchronously (don't wait)
+				// Step 2: Get summoner data (for profileIconId)
+				const summoner = await getSummonerByPuuid(puuid, platform);
+
+				// Step 3: Get ranked league entries in parallel with mastery
+				const [rankedEntries, topChampionMastery] = await Promise.all([
+					getRankedLeagueEntries(summoner.id, platform).catch(() => []),
+					getTopChampionMastery(puuid, platform, 3).catch(() => [])
+				]);
+
+				// Step 4: Trigger match fetching asynchronously (don't wait)
+				// This will fetch match IDs from Riot and update DynamoDB with the correct totalMatches
 				await triggerMatchFetch(gameName, tagLine, platform, region, currentYear);
 
+				// Return complete player info immediately
 				return {
 					statusCode: 202,
 					headers: corsHeaders,
 					body: JSON.stringify({
 						message: 'Processing started',
 						status: 'PENDING',
-						puuid: puuid
+						puuid: puuid,
+						account: {
+							...account,
+							summoner,
+							rankedEntries,
+							topChampionMastery
+						}
 					})
 				};
 			} catch (error) {

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getChampionIconUrl, preloadStaticData } from '$lib/data-dragon';
+	import { preloadStaticData } from '$lib/data-dragon';
 
 	// Preload static data on component mount
 	onMount(() => {
@@ -30,87 +30,26 @@
 	let selectedRegion = $state('na1');
 	let gameName = $state('');
 	let tagLine = $state('');
-	let loading = $state(false);
-	let loadingProgress = $state('');
 	let error = $state<string | null>(null);
-	let recapData = $state<any>(null);
-	let accountData = $state<any>(null);
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
-		loading = true;
-		error = null;
-		recapData = null;
-		accountData = null;
-		loadingProgress = 'Initiating processing...';
 
-		await handleProgressiveLoad();
-	}
-
-	async function handleProgressiveLoad() {
-		try {
-			const regionConfig = regions.find((r) => r.platform === selectedRegion);
-			if (!regionConfig) {
-				throw new Error('Invalid region selected');
-			}
-
-			const eventSource = new EventSource(
-				`/api/player/stream?gameName=${encodeURIComponent(gameName)}&tagLine=${encodeURIComponent(tagLine)}&platform=${regionConfig.platform}&region=${regionConfig.region}`
-			);
-
-			eventSource.onmessage = (event) => {
-				try {
-					const chunk = JSON.parse(event.data);
-
-					switch (chunk.type) {
-						case 'status':
-							loadingProgress = chunk.message;
-							if (chunk.puuid) {
-								accountData = { puuid: chunk.puuid };
-							}
-							break;
-
-						case 'player_info':
-							accountData = chunk.account;
-							loadingProgress = 'Fetching player information...';
-							break;
-
-						case 'progress':
-							loadingProgress = chunk.message;
-							break;
-
-						case 'partial':
-							// Progressive data update - show partial results
-							recapData = chunk.data;
-							loadingProgress = 'Processing matches... Data updating in real-time!';
-							break;
-
-						case 'complete':
-							recapData = chunk.data;
-							loadingProgress = 'Complete!';
-							loading = false;
-							eventSource.close();
-							break;
-
-						case 'error':
-							throw new Error(chunk.error);
-					}
-				} catch (err) {
-					error = err instanceof Error ? err.message : 'Failed to parse stream data';
-					eventSource.close();
-					loading = false;
-				}
-			};
-
-			eventSource.onerror = () => {
-				error = 'Connection to server lost';
-				eventSource.close();
-				loading = false;
-			};
-		} catch (err) {
-			error = err instanceof Error ? err.message : 'An error occurred';
-			loading = false;
+		// Navigate to the processing page with search params
+		const regionConfig = regions.find((r) => r.platform === selectedRegion);
+		if (!regionConfig) {
+			error = 'Invalid region selected';
+			return;
 		}
+
+		const params = new URLSearchParams({
+			gameName,
+			tagLine,
+			platform: regionConfig.platform,
+			region: regionConfig.region
+		});
+
+		window.location.href = `/recap?${params.toString()}`;
 	}
 </script>
 
@@ -174,24 +113,12 @@
 				<div class="flex justify-center">
 					<button
 						type="submit"
-						disabled={loading}
-						class="w-full rounded-md bg-blue-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-blue-700 disabled:bg-slate-600 sm:w-auto sm:px-12"
+						class="w-full rounded-md bg-blue-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-blue-700 sm:w-auto sm:px-12"
 					>
-						{loading ? 'Loading...' : 'Generate Recap'}
+						Generate Recap
 					</button>
 				</div>
 			</form>
-			{#if loadingProgress}
-				<div class="mt-4">
-					<p class="text-center text-sm text-slate-400">{loadingProgress}</p>
-					<div class="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-700">
-						<div
-							class="h-full animate-pulse bg-blue-600"
-							style="width: {loading ? '100%' : '0%'}"
-						></div>
-					</div>
-				</div>
-			{/if}
 		</div>
 
 		<!-- Error Message -->
@@ -202,174 +129,8 @@
 			</div>
 		{/if}
 
-		<!-- Recap Data -->
-		{#if recapData}
-			<div class="space-y-8">
-				<!-- Player Info -->
-				<div class="rounded-lg bg-slate-800/50 p-6 shadow-xl backdrop-blur-sm">
-					<div class="flex items-center gap-6">
-						<div>
-							<h2 class="text-3xl font-bold text-white">
-								{#if accountData?.gameName}
-									{accountData.gameName}
-									<span class="text-slate-400">#{accountData.tagLine}</span>
-								{:else}
-									{gameName}
-									<span class="text-slate-400">#{tagLine}</span>
-								{/if}
-							</h2>
-							<p class="text-sm text-slate-400">
-								{recapData.year || new Date().getFullYear()} Recap
-								{#if recapData.lastUpdated}
-									- Last Updated: {new Date(recapData.lastUpdated).toLocaleString()}
-								{/if}
-							</p>
-						</div>
-					</div>
-				</div>
-
-				<!-- Top 3 Champions -->
-				{#if recapData.stats.top3Champions && recapData.stats.top3Champions.length > 0}
-					<div class="rounded-lg bg-slate-800/50 p-6 shadow-xl backdrop-blur-sm">
-						<h3 class="mb-4 text-2xl font-bold text-white">🏆 Top 3 Most Played Champions</h3>
-						<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-							{#each recapData.stats.top3Champions as champion}
-								<div class="rounded-lg bg-slate-700/50 p-4">
-									<div class="flex items-center gap-4">
-										<div class="h-16 w-16 overflow-hidden rounded-lg border-2 border-blue-500">
-											<img
-												src={getChampionIconUrl(champion.championName)}
-												alt={champion.championName}
-												width="64"
-												height="64"
-												class="object-cover"
-											/>
-										</div>
-										<div class="flex-1">
-											<p class="text-lg font-bold text-white">{champion.championName}</p>
-											<p class="text-sm text-slate-300">{champion.gamesPlayed} games played</p>
-											<p class="text-sm text-slate-400">
-												{champion.wins}W - {champion.losses}L ({(champion.winRate * 100).toFixed(
-													0
-												)}% WR)
-											</p>
-										</div>
-									</div>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-
-				<!-- Favorite Champions by Role -->
-				{#if recapData.stats.favoriteChampions && recapData.stats.favoriteChampions.length > 0}
-					<div class="rounded-lg bg-slate-800/50 p-6 shadow-xl backdrop-blur-sm">
-						<h3 class="mb-4 text-2xl font-bold text-white">⭐ Favorite Champions (by Role)</h3>
-						<p class="mb-4 text-sm text-slate-400">
-							Champions with best win rate (minimum 3 games) in each role
-						</p>
-						<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-							{#each recapData.stats.favoriteChampions as champion}
-								<div class="rounded-lg bg-slate-700/50 p-4">
-									<div class="flex items-center gap-3">
-										<div class="h-12 w-12 overflow-hidden rounded-lg border-2 border-green-500">
-											<img
-												src={getChampionIconUrl(champion.championName)}
-												alt={champion.championName}
-												width="48"
-												height="48"
-												class="object-cover"
-											/>
-										</div>
-										<div>
-											<p class="font-semibold text-white">{champion.championName}</p>
-											<p class="text-xs text-slate-400">{champion.role}</p>
-											<p class="text-xs text-green-400">
-												{champion.wins}/{champion.gamesPlayedWith} ({(
-													champion.winRate * 100
-												).toFixed(0)}% WR)
-											</p>
-										</div>
-									</div>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-
-				<!-- Nemesis Champions -->
-				{#if recapData.stats.nemesisChampions && recapData.stats.nemesisChampions.length > 0}
-					<div class="rounded-lg bg-slate-800/50 p-6 shadow-xl backdrop-blur-sm">
-						<h3 class="mb-4 text-2xl font-bold text-white">😈 Nemesis Champions</h3>
-						<p class="mb-4 text-sm text-slate-400">Lane opponents you struggled against</p>
-						<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-							{#each recapData.stats.nemesisChampions as champion}
-								<div class="rounded-lg bg-red-900/30 p-4">
-									<div class="flex items-center gap-3">
-										<div class="h-12 w-12 overflow-hidden rounded-lg border-2 border-red-500">
-											<img
-												src={getChampionIconUrl(champion.championName)}
-												alt={champion.championName}
-												width="48"
-												height="48"
-												class="object-cover"
-											/>
-										</div>
-										<div>
-											<p class="font-semibold text-white">{champion.championName}</p>
-											<p class="text-xs text-red-400">
-												{champion.losses}/{champion.gamesAgainst} losses ({(
-													champion.lossRate * 100
-												).toFixed(0)}% loss rate)
-											</p>
-										</div>
-									</div>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-
-				<!-- Hated Champions by Role -->
-				{#if recapData.stats.hatedChampions && recapData.stats.hatedChampions.length > 0}
-					<div class="rounded-lg bg-slate-800/50 p-6 shadow-xl backdrop-blur-sm">
-						<h3 class="mb-4 text-2xl font-bold text-white">💀 Hated Champions (by Role)</h3>
-						<p class="mb-4 text-sm text-slate-400">
-							Enemy champions by role you struggled against most
-						</p>
-						<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-							{#each recapData.stats.hatedChampions as champion}
-								<div class="rounded-lg bg-red-900/30 p-4">
-									<div class="flex items-center gap-3">
-										<div class="h-12 w-12 overflow-hidden rounded-lg border-2 border-red-500">
-											<img
-												src={getChampionIconUrl(champion.championName)}
-												alt={champion.championName}
-												width="48"
-												height="48"
-												class="object-cover"
-											/>
-										</div>
-										<div>
-											<p class="font-semibold text-white">{champion.championName}</p>
-											<p class="text-xs text-slate-400">{champion.role}</p>
-											<p class="text-xs text-red-400">
-												{champion.losses}/{champion.gamesAgainst} losses ({(
-													champion.lossRate * 100
-												).toFixed(0)}% loss rate)
-											</p>
-										</div>
-									</div>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			</div>
-		{/if}
-
 		<!-- Empty State -->
-		{#if !recapData && !loading && !error}
+		{#if !error}
 			<div class="text-center text-slate-400">
 				<p>Enter a summoner name to generate your {new Date().getFullYear()} recap</p>
 			</div>

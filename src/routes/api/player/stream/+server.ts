@@ -26,7 +26,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			const encoder = new TextEncoder();
 
 			try {
-				// Step 1: Trigger processing on AWS
+				// Step 1: Trigger processing on AWS and get complete account data
 				const triggerUrl = `${PUBLIC_AWS_API_URL}/player?gameName=${encodeURIComponent(gameName)}&tagLine=${encodeURIComponent(tagLine)}&platform=${platform}&region=${region}&year=${year}`;
 
 				const triggerResponse = await fetch(triggerUrl);
@@ -47,19 +47,18 @@ export const GET: RequestHandler = async ({ url }) => {
 
 				const triggerData = await triggerResponse.json();
 				const puuid = triggerData.puuid;
+				const account = triggerData.account;
 
 				if (!puuid) {
 					throw new Error('Failed to get player PUUID from AWS');
 				}
 
-				// Send initial status
+				// Send complete account data immediately (summoner, ranked, mastery)
 				controller.enqueue(
 					encoder.encode(
 						`data: ${JSON.stringify({
-							type: 'status',
-							message: 'Processing started on AWS',
-							status: triggerData.status,
-							puuid: puuid
+							type: 'player_info',
+							account: account
 						})}\n\n`
 					)
 				);
@@ -75,25 +74,40 @@ export const GET: RequestHandler = async ({ url }) => {
 					const delay = Math.min(2000 + attempts * 200, 10000);
 					await new Promise((resolve) => setTimeout(resolve, delay));
 
+					// First, check player status for progress info
+					const playerUrl = `${PUBLIC_AWS_API_URL}/player/status?puuid=${puuid}&year=${year}`;
+					let playerData: any = null;
+					let isComplete = false;
+
+					try {
+						const playerResponse = await fetch(playerUrl);
+						if (playerResponse.ok) {
+							playerData = await playerResponse.json();
+							isComplete = playerData.status === 'COMPLETE';
+
+							// Send status update with match counts
+							controller.enqueue(
+								encoder.encode(
+									`data: ${JSON.stringify({
+										type: 'status',
+										message: `Processing ${playerData.processedMatches || 0}/${playerData.totalMatches || 0} matches...`,
+										totalMatches: playerData.totalMatches || 0,
+										processedMatches: playerData.processedMatches || 0,
+										status: playerData.status
+									})}\n\n`
+								)
+							);
+						}
+					} catch (e) {
+						// If we can't get player status yet, continue
+					}
+
 					// Try to fetch the recap (partial or complete)
 					const recapUrl = `${PUBLIC_AWS_API_URL}/player/recap?puuid=${puuid}&year=${year}`;
 					const recapResponse = await fetch(recapUrl);
 
 					if (recapResponse.ok) {
 						const recapData = await recapResponse.json();
-
-						// Check if processing is complete by looking at the player status
-						const playerUrl = `${PUBLIC_AWS_API_URL}/player/status?puuid=${puuid}&year=${year}`;
-						let isComplete = false;
-						try {
-							const playerResponse = await fetch(playerUrl);
-							if (playerResponse.ok) {
-								const playerData = await playerResponse.json();
-								isComplete = playerData.status === 'COMPLETE';
-							}
-						} catch (e) {
-							// If we can't get player status, assume not complete yet
-						}
 
 						// Send the champion stats (partial or complete)
 						controller.enqueue(
@@ -110,7 +124,8 @@ export const GET: RequestHandler = async ({ url }) => {
 							controller.close();
 							return;
 						}
-					} else {
+					} else if (!playerData) {
+						// Only send generic progress if we don't have player data
 						controller.enqueue(
 							encoder.encode(
 								`data: ${JSON.stringify({

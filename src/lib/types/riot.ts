@@ -311,6 +311,22 @@ export interface Champion {
 	};
 }
 
+// League V4 - Ranked League Entries
+export interface LeagueEntryDto {
+	leagueId: string;
+	summonerId: string;
+	queueType: string; // e.g., "RANKED_SOLO_5x5", "RANKED_FLEX_SR"
+	tier: string; // e.g., "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"
+	rank: string; // e.g., "I", "II", "III", "IV"
+	leaguePoints: number;
+	wins: number;
+	losses: number;
+	hotStreak: boolean;
+	veteran: boolean;
+	freshBlood: boolean;
+	inactive: boolean;
+}
+
 export interface PlayerData {
 	account: AccountDto;
 	summoner: SummonerDto;

@@ -1,6 +1,3 @@
-// Data Dragon utility functions for static assets
-// Uses Riot's officially maintained JSON files instead of hardcoded mappings
-
 const DATA_DRAGON_BASE = 'https://ddragon.leagueoflegends.com/cdn';
 const STATIC_DATA_BASE = 'https://static.developer.riotgames.com/docs/lol';
 
@@ -12,7 +9,8 @@ const cache = {
 	queues: null as QueueData[] | null,
 	maps: null as MapData[] | null,
 	gameModes: null as GameModeData[] | null,
-	gameTypes: null as GameTypeData[] | null
+	gameTypes: null as GameTypeData[] | null,
+	champions: null as Record<string, any> | null
 };
 
 /**
@@ -266,6 +264,45 @@ export function getGameTypeDescription(gameType: string): string {
 }
 
 /**
+ * Fetch champion data from Data Dragon
+ */
+async function fetchChampions(): Promise<Record<string, any>> {
+	if (cache.champions) {
+		return cache.champions;
+	}
+
+	try {
+		const version = getVersion();
+		const response = await fetch(`${DATA_DRAGON_BASE}/${version}/data/en_US/champion.json`);
+		if (!response.ok) {
+			throw new Error('Failed to fetch champion.json');
+		}
+		const data = await response.json();
+		cache.champions = data.data;
+		return cache.champions!;
+	} catch (error) {
+		console.error('Failed to fetch champions:', error);
+		return {};
+	}
+}
+
+/**
+ * Get champion name from champion ID
+ */
+export async function getChampionNameById(championId: number): Promise<string> {
+	const champions = await fetchChampions();
+
+	// Find champion by key (ID)
+	for (const [name, champion] of Object.entries(champions)) {
+		if (parseInt(champion.key) === championId) {
+			return champion.name;
+		}
+	}
+
+	return `Champion ${championId}`;
+}
+
+/**
  * Preload all static data including version
  * Call this on app initialization to cache all data
  */
@@ -275,7 +312,8 @@ export async function preloadStaticData(): Promise<void> {
 		fetchQueues(),
 		fetchMaps(),
 		fetchGameModes(),
-		fetchGameTypes()
+		fetchGameTypes(),
+		fetchChampions()
 	]);
 }
 

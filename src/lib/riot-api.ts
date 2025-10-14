@@ -1,5 +1,5 @@
 import { RIOT_API_KEY } from '$env/static/private';
-import type { AccountDto, SummonerDto, MatchDto } from '$lib/types/riot';
+import type { AccountDto, SummonerDto, MatchDto, LeagueEntryDto } from '$lib/types/riot';
 import { withRateLimit } from './rate-limiter';
 import {
 	cachePlayer,
@@ -60,6 +60,33 @@ export async function getSummonerByPuuid(
 		if (!response.ok) {
 			const errorText = await response.text();
 			throw new Error(`Failed to fetch summoner: ${response.status} - ${errorText}`);
+		}
+
+		return response.json();
+	});
+}
+
+/**
+ * Get ranked league entries for a summoner by summoner ID
+ * Uses League V4 API with platform routing
+ * Returns an array of league entries (one for each queue type)
+ */
+export async function getRankedLeagueEntries(
+	summonerId: string,
+	platform: string = 'na1'
+): Promise<LeagueEntryDto[]> {
+	return withRateLimit(async () => {
+		const url = `https://${platform}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerId}`;
+
+		const response = await fetch(url, {
+			headers: {
+				'X-Riot-Token': RIOT_API_KEY || ''
+			}
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text();
+			throw new Error(`Failed to fetch ranked entries: ${response.status} - ${errorText}`);
 		}
 
 		return response.json();

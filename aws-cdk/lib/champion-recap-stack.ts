@@ -31,7 +31,8 @@ export class ChampionRecapStack extends cdk.Stack {
 					]
 				}
 			],
-			removalPolicy: cdk.RemovalPolicy.RETAIN
+			removalPolicy: cdk.RemovalPolicy.DESTROY,
+			autoDeleteObjects: true
 		});
 
 		// ===================================
@@ -44,7 +45,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			partitionKey: { name: 'puuid', type: dynamodb.AttributeType.STRING },
 			sortKey: { name: 'year', type: dynamodb.AttributeType.NUMBER },
 			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST, // Auto-scaling
-			removalPolicy: cdk.RemovalPolicy.RETAIN,
+			removalPolicy: cdk.RemovalPolicy.DESTROY,
 			pointInTimeRecovery: true,
 			stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES
 		});
@@ -55,7 +56,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			partitionKey: { name: 'puuid', type: dynamodb.AttributeType.STRING },
 			sortKey: { name: 'year', type: dynamodb.AttributeType.NUMBER },
 			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-			removalPolicy: cdk.RemovalPolicy.RETAIN,
+			removalPolicy: cdk.RemovalPolicy.DESTROY,
 			pointInTimeRecovery: true
 		});
 

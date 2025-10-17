@@ -41,9 +41,22 @@ export interface ChampionRecap {
  * Extract player's position in a match
  */
 function getPlayerPosition(participant: ParticipantDto): string {
-	const position = participant.teamPosition || participant.individualPosition || 'SUPPORT';
+	let position = participant.teamPosition || participant.individualPosition || 'SUPPORT';
+
+	// Handle empty strings
+	if (!position || position.trim() === '') {
+		position = 'SUPPORT';
+	}
+
 	// Map UTILITY to SUPPORT for better readability
 	return position === 'UTILITY' ? 'SUPPORT' : position;
+}
+
+/**
+ * Check if a position is valid (not Invalid or empty)
+ */
+function isValidPosition(position: string): boolean {
+	return !!(position && position.toUpperCase() !== 'INVALID');
 }
 
 /**
@@ -176,8 +189,10 @@ export function aggregateChampionStats(matches: MatchDto[], playerPuuid: string)
 			playerChamp.total++;
 			playerChampionMap.set(analysis.playerChampion.championId, playerChamp);
 
-			// Update teammate champion stats
+			// Update teammate champion stats (skip Invalid positions)
 			for (const teammate of analysis.teammates) {
+				if (!isValidPosition(teammate.role)) continue;
+
 				const key = `${teammate.championId}-${teammate.role}`;
 				const stats = teammateChampionMap.get(key) || {
 					championId: teammate.championId,
@@ -190,8 +205,8 @@ export function aggregateChampionStats(matches: MatchDto[], playerPuuid: string)
 				teammateChampionMap.set(key, stats);
 			}
 
-			// Update lane opponent stats (nemesis)
-			if (analysis.laneOpponent) {
+			// Update lane opponent stats (nemesis) - skip Invalid positions
+			if (analysis.laneOpponent && isValidPosition(analysis.laneOpponent.role)) {
 				const stats = laneOpponentMap.get(analysis.laneOpponent.championId) || {
 					name: analysis.laneOpponent.championName,
 					role: analysis.laneOpponent.role,
@@ -203,8 +218,10 @@ export function aggregateChampionStats(matches: MatchDto[], playerPuuid: string)
 				laneOpponentMap.set(analysis.laneOpponent.championId, stats);
 			}
 
-			// Update enemy champion stats
+			// Update enemy champion stats (skip Invalid positions)
 			for (const enemy of analysis.enemies) {
+				if (!isValidPosition(enemy.role)) continue;
+
 				const key = `${enemy.championId}-${enemy.role}`;
 				const stats = enemyChampionMap.get(key) || {
 					championId: enemy.championId,

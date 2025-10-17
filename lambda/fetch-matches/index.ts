@@ -258,14 +258,36 @@ export async function handler(event: FetchMatchesEvent) {
 		}));
 
 		if (existingData.Item && existingData.Item.status === 'PROCESSING') {
-			console.log('Already processing for this player/year');
+			console.log('Already processing for this player/year - allowing reconnection');
+			// Don't block - allow user to reconnect and see progress
+			// The SSE stream will pick up the current status
 			return {
 				statusCode: 200,
 				body: JSON.stringify({
 					puuid,
 					year,
-					status: 'ALREADY_PROCESSING',
-					message: 'Processing already in progress'
+					status: 'PROCESSING',
+					totalMatches: existingData.Item.totalMatches,
+					cachedMatches: existingData.Item.cachedMatches,
+					processedMatches: existingData.Item.processedMatches,
+					queuedMatches: existingData.Item.queuedMatches,
+					message: 'Reconnected to existing processing session'
+				})
+			};
+		}
+
+		if (existingData.Item && existingData.Item.status === 'COMPLETE') {
+			console.log('Processing already complete for this player/year');
+			// Return the existing complete status
+			return {
+				statusCode: 200,
+				body: JSON.stringify({
+					puuid,
+					year,
+					status: 'COMPLETE',
+					totalMatches: existingData.Item.totalMatches,
+					processedMatches: existingData.Item.processedMatches,
+					message: 'Processing already complete'
 				})
 			};
 		}

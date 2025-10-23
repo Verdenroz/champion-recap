@@ -1,0 +1,293 @@
+"""Audio concatenation for creating reference files."""
+
+from pathlib import Path
+from typing import List
+import json
+
+import librosa
+import numpy as np
+import soundfile as sf
+from rich.console import Console
+
+from .models import ChampionMetadata, ChampionCheckpoint, ChampionStatus, AudioFile
+from .state_manager import StateManager
+
+console = Console()
+
+
+class AudioConcatenator:
+    """Concatenates processed audio files into reference file."""
+
+    def __init__(
+        self,
+        state_manager: StateManager,
+        sample_rate: int = 22050,
+        silence_duration: float = 0.3,  # 300ms silence between clips
+    ):
+        self.state = state_manager
+        self.sample_rate = sample_rate
+        self.silence_duration = silence_duration
+
+    def concatenate_wav_files(
+        self, wav_paths: List[Path], output_path: Path
+    ) -> Path:
+        """
+        Concatenate multiple WAV files into single reference audio.
+
+        Args:
+            wav_paths: List of WAV file paths to concatenate
+            output_path: Output path for concatenated WAV
+
+        Returns:
+            Path to concatenated audio file
+        """
+        console.print(f"[cyan]Concatenating {len(wav_paths)} audio clips...")
+
+        # Generate silence segment
+        silence_samples = int(self.silence_duration * self.sample_rate)
+        silence = np.zeros(silence_samples, dtype=np.float32)
+
+        combined_audio = []
+
+        for wav_path in wav_paths:
+            try:
+                # Load audio
+                audio, sr = librosa.load(str(wav_path), sr=self.sample_rate, mono=True)
+
+                # Ensure sample rate consistency
+                if sr != self.sample_rate:
+                    audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
+
+                # Add audio clip
+                combined_audio.append(audio)
+
+                # Add silence
+                combined_audio.append(silence)
+
+            except Exception as e:
+                console.print(f"[yellow]Failed to load {wav_path.name}: {e}")
+                continue
+
+        if not combined_audio:
+            raise ValueError("No audio clips were successfully loaded")
+
+        # Concatenate all segments
+        final_audio = np.concatenate(combined_audio)
+
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save concatenated audio
+        sf.write(
+            str(output_path),
+            final_audio,
+            self.sample_rate,
+            subtype='PCM_16'
+        )
+
+        duration = len(final_audio) / self.sample_rate
+        console.print(f"[green]Created reference audio: {duration:.2f}s")
+
+        return output_path
+
+    def _extract_quoted_text(self, text: str) -> str:
+        """
+        Extract only text within quotation marks from transcript.
+
+        Handles cases like: Come!" Aatrox grunts. "Destiny awaits!
+        Returns: Come! Destiny awaits!
+
+        Args:
+            text: Raw transcript text with possible sound effects
+
+        Returns:
+            Only the quoted dialogue, concatenated
+        """
+        import re
+
+        # Find all text within double quotes
+        double_quoted = re.findall(r'"([^"]*)"', text)
+
+        # Find all text within single quotes (fallback)
+        single_quoted = re.findall(r"'([^']*)'", text)
+
+        # Prefer double quotes, fallback to single quotes
+        quoted_parts = double_quoted if double_quoted else single_quoted
+
+        if quoted_parts:
+            # Join all quoted parts with a space
+            return ' '.join(quoted_parts).strip()
+
+        # If no quotes found, return original (shouldn't happen with our filters)
+        return text
+
+    def generate_reference_txt(
+        self, audio_files: List[Path], audio_file_data: List[AudioFile], output_path: Path
+    ) -> Path:
+        """
+        Generate reference transcription file from actual voice line text.
+
+        Args:
+            audio_files: List of processed WAV file paths (in order)
+            audio_file_data: List of AudioFile objects with transcript data
+            output_path: Output path for reference.txt
+
+        Returns:
+            Path to reference.txt file
+        """
+        console.print("[cyan]Generating reference transcription...")
+
+        # Create filename -> transcript mapping from audio_file_data
+        # Match by OGG filename (without extension)
+        transcript_map = {}
+        for audio_data in audio_file_data:
+            # OGG filename without extension
+            ogg_stem = Path(audio_data.filename).stem
+            if audio_data.transcript:
+                # Extract only quoted dialogue, removing sound effects
+                clean_transcript = self._extract_quoted_text(audio_data.transcript)
+                transcript_map[ogg_stem] = clean_transcript
+
+        # Generate transcription lines
+        transcription_lines = []
+        missing_transcripts = 0
+
+        for wav_path in audio_files:
+            # WAV filename is same as OGG filename (just different extension)
+            wav_stem = wav_path.stem
+
+            # Try to find matching transcript
+            if wav_stem in transcript_map:
+                transcription_lines.append(transcript_map[wav_stem])
+            else:
+                # Fallback to filename-based placeholder
+                missing_transcripts += 1
+                parts = wav_stem.split('_')
+                if len(parts) >= 3:
+                    text = ' '.join(parts[2:])
+                else:
+                    text = wav_stem
+                transcription_lines.append(f"[{text}]")  # Mark as placeholder
+
+        # Write to file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        transcription_text = '\n'.join(transcription_lines)
+        output_path.write_text(transcription_text)
+
+        if missing_transcripts > 0:
+            console.print(f"[yellow]⚠ Note: {missing_transcripts} files have placeholder transcriptions (marked with []).")
+        else:
+            console.print("[green]✓ All voice lines transcribed from wiki data.")
+
+        return output_path
+
+    def create_metadata_json(
+        self,
+        champion_id: str,
+        champion_name: str,
+        total_clips: int,
+        total_duration: float,
+        output_path: Path,
+    ) -> Path:
+        """
+        Create metadata.json file.
+
+        Args:
+            champion_id: Champion identifier
+            champion_name: Champion display name
+            total_clips: Number of audio clips
+            total_duration: Total duration in seconds
+            output_path: Output path for metadata.json
+
+        Returns:
+            Path to metadata.json file
+        """
+        metadata = ChampionMetadata(
+            champion_id=champion_id,
+            name=champion_name,
+            total_clips=total_clips,
+            total_duration=total_duration,
+            sample_rate=self.sample_rate,
+        )
+
+        metadata.save(output_path.parent)
+
+        console.print(f"[green]Created metadata.json")
+
+        return output_path.parent / "metadata.json"
+
+    def concatenate_champion(
+        self,
+        champion_id: str,
+        checkpoint: ChampionCheckpoint,
+        processed_dir: Path,
+        final_output_dir: Path,
+    ) -> bool:
+        """
+        Concatenate all processed audio for a champion and create reference files.
+
+        Args:
+            champion_id: Champion identifier
+            checkpoint: Champion checkpoint
+            processed_dir: Directory with processed WAV files
+            final_output_dir: Final output directory (e.g., voice-cloning/champion-voices/{champion_id}/)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        console.print(f"\n[cyan]Creating reference files for {checkpoint.champion_name}...")
+
+        # Update stage
+        self.state.update_champion_stage(champion_id, ChampionStatus.CONCATENATING)
+
+        try:
+            # Get all processed WAV files
+            wav_files = sorted(processed_dir.glob("*.wav"))
+
+            if not wav_files:
+                error = "No processed WAV files found"
+                console.print(f"[red]{error}")
+                self.state.mark_champion_failed(champion_id, error)
+                return False
+
+            # Ensure final output directory exists
+            champion_output_dir = final_output_dir / champion_id
+            champion_output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Concatenate audio files
+            reference_wav_path = champion_output_dir / "reference.wav"
+            self.concatenate_wav_files(wav_files, reference_wav_path)
+
+            # Calculate total duration
+            audio, sr = librosa.load(str(reference_wav_path), sr=None, mono=True)
+            total_duration = len(audio) / sr
+
+            # Generate reference.txt with actual transcripts
+            reference_txt_path = champion_output_dir / "reference.txt"
+            self.generate_reference_txt(wav_files, checkpoint.audio_files, reference_txt_path)
+
+            # Create metadata.json
+            metadata_path = champion_output_dir / "metadata.json"
+            self.create_metadata_json(
+                champion_id=champion_id,
+                champion_name=checkpoint.champion_name,
+                total_clips=len(wav_files),
+                total_duration=total_duration,
+                output_path=metadata_path,
+            )
+
+            console.print(f"[green]✓ Successfully created reference files for {checkpoint.champion_name}")
+            console.print(f"  - reference.wav: {total_duration:.2f}s ({len(wav_files)} clips)")
+            console.print(f"  - reference.txt: {len(wav_files)} voice lines")
+            console.print(f"  - metadata.json: champion metadata")
+
+            # Mark champion as completed
+            self.state.mark_champion_completed(champion_id)
+
+            return True
+
+        except Exception as e:
+            error = f"Concatenation failed: {e}"
+            console.print(f"[red]{error}")
+            self.state.mark_champion_failed(champion_id, error)
+            return False

@@ -55,7 +55,6 @@ class WikiScraper:
         # Find all links that match pattern /en-us/{Champion}/Audio
         for link in soup.find_all('a', href=re.compile(r'/en-us/.+/Audio$')):
             href = link.get('href')
-            title = link.get('title', '')
 
             # Extract champion name from href
             # Example: /en-us/Aatrox/Audio -> Aatrox
@@ -125,123 +124,168 @@ class WikiScraper:
         checkpoint.stage = ChampionStatus.DOWNLOADING
         self.state.save_checkpoint(champion_id, checkpoint)
 
-        console.print(f"[green]Found {len(audio_files)} Original skin audio files")
+        console.print(f"[green]Found {len(audio_files)} audio files")
 
         # Rate limiting
         time.sleep(REQUEST_DELAY)
 
         return checkpoint
 
-    def _extract_original_audio(
-        self, soup: BeautifulSoup, champion_name: str
-    ) -> List[AudioFile]:
+    def _extract_original_audio(self, soup: BeautifulSoup, champion_name: str) -> List[AudioFile]:
         """
-        Extract Original skin audio URLs from page.
+        Extract audio URLs from page.
 
-        Only extracts from voice line sections (Movement, Taunt, Joke, Attack, etc.)
-        Excludes "Sound Effects" section.
+        Strategy: Scrape ALL <li> elements from the entire page, then filter for:
+        - Champions WITHOUT skins: Download ALL audio in each <li>
+        - Champions WITH skins: Download ONLY data-skin="Original" audio
+        - Must have quotation marks (dialogue only, excludes SFX/non-dialogue)
 
-        Strategy:
-        1. Find all <h2> section headers
-        2. For each voice line section (not "Sound Effects"):
-           - Get all <li> elements until next <h2>
-           - Extract audio with data-skin="Original"
+        Args:
+            soup: BeautifulSoup object of the champion's audio page
+
+        Returns:
+            List of AudioFile objects matching the filter criteria
         """
         audio_files = []
 
-        # Voice line section IDs to include (exclude "Sound_Effects", "Co-op_vs._AI_Responses", etc.)
-        voice_sections = {
-            'Movement', 'First Encounter', 'Taunt', 'Joke', 'Attack', 'Kills and Objectives', 'Other Gameplay'
-        }
+        # This ensures we have complete skin list for filtering
+        all_skin_spans = soup.find_all('span', {'data-skin': True})
+        non_original_skins = []
+        for span in all_skin_spans:
+            skin_name = span.get('data-skin', '')
+            if skin_name and skin_name != 'Original':
+                non_original_skins.append(skin_name)
+        # Deduplicate skin names
+        non_original_skins = list(set(non_original_skins))
 
-        # Find all h2 section headers
-        h2_tags = soup.find_all('h2')
+        # Find ALL <li> elements on the page
+        all_li_elements = soup.find_all('li')
 
-        for h2 in h2_tags:
-            # Get section ID from mw-headline span
-            headline_span = h2.find('span', class_='mw-headline')
-            if not headline_span:
-                continue
-
-            section_id = headline_span.get('id', '')
-
-            # Skip if not a voice line section
-            if section_id not in voice_sections:
-                continue
-
-            # Get all content between this h2 and the next h2
-            current = h2.next_sibling
-            while current:
-                # Stop if we hit another h2
-                if current.name == 'h2':
-                    break
-
-                # Process ul elements (which contain li with audio)
-                if current.name == 'ul':
-                    # Find all li with audio in this ul
-                    for li in current.find_all('li'):
-                        audio_file = self._extract_audio_from_li(li)
-                        if audio_file:
-                            audio_files.append(audio_file)
-
-                current = current.next_sibling
+        for li in all_li_elements:
+            # Pass page-level skin list to ensure consistent filtering
+            files_from_li = self._extract_audio_from_li(li, champion_name, non_original_skins)
+            audio_files.extend(files_from_li)
 
         return audio_files
 
-    def _extract_audio_from_li(self, li) -> Optional[AudioFile]:
+    def _extract_audio_from_li(self, li, champion_name: str, non_original_skins: List[str]) -> List[AudioFile]:
         """
-        Extract audio file from a single <li> element.
+        Extract audio files from a single <li> element.
 
-        Returns AudioFile if:
-        - Contains <audio> tag with source
-        - Has data-skin="Original"
+        Filtering criteria (must meet ALL):
+        1. Contains <audio> tag(s) with valid source URL
+        2. Has quotation marks in text (dialogue only, excludes SFX)
+        3. Champion name in filename (prevents cross-champion audio)
+        4. Skin handling:
+           - If NO data-skin spans found: Extract ALL audio (champion has no skin variations)
+           - If data-skin spans found: Extract ONLY audio adjacent to data-skin="Original"
+        5. Defensive: Filename doesn't contain non-Original skin names
 
-        Returns None otherwise.
+        Args:
+            li: BeautifulSoup <li> element to check
+            champion_name: Name of the champion being scraped
+            non_original_skins: List of all non-Original skin names from entire page
+
+        Returns:
+            List of AudioFile objects (may be empty, or contain multiple files)
         """
-        # Check if this li contains an audio element
-        audio_tag = li.find('audio')
-        if not audio_tag:
-            return None
+        audio_files = []
 
-        # Get audio source
-        source = audio_tag.find('source')
-        if not source or not source.get('src'):
-            return None
+        # MUST have quotation marks (dialogue only)
+        li_text = li.get_text()
+        if '"' not in li_text and "'" not in li_text:
+            return audio_files
 
-        audio_url = source.get('src')
+        # Generate champion ID for filename validation
+        champion_id = champion_name.lower().replace("'", "").replace(" ", "")
 
-        # Check if this li contains Original skin designation
-        # Look for: <span data-skin="Original">
-        skin_span = li.find('span', {'data-skin': 'Original'})
-        if not skin_span:
-            return None
+        # Check if this li has ANY data-skin spans
+        skin_spans = li.find_all('span', {'data-skin': True})
+        has_skins = len(skin_spans) > 0
 
-        # Construct full URL
-        full_url = urljoin(BASE_URL, audio_url)
-
-        # Extract filename
-        filename = audio_url.split('/')[-1].split('?')[0]  # Remove query params
-
-        # Skip sound effects files (contain 'SFX' in filename)
-        if 'SFX' in filename:
-            return None
-
-        # Extract transcript from <i> tag within the same <li>
+        # Extract transcript from <i> tag for reference text generation
         transcript = None
         i_tag = li.find('i')
         if i_tag:
-            transcript_raw = i_tag.get_text(strip=True)
-            # Only include audio files with actual dialogue (must contain quotes)
-            if '"' not in transcript_raw and "'" not in transcript_raw:
-                return None
-            # Keep the raw transcript with quotes for later processing
-            transcript = transcript_raw
+            transcript = i_tag.get_text(strip=True)
 
-        return AudioFile(
-            url=full_url,
-            filename=filename,
-            transcript=transcript,
-        )
+        # Find all audio elements in this li
+        audio_tags = li.find_all('audio')
+
+        if not has_skins:
+            # NO SKIN VARIATIONS: Download ALL audio in this li
+            for audio_tag in audio_tags:
+                source = audio_tag.find('source')
+                if not source or not source.get('src'):
+                    continue
+
+                audio_url = source.get('src')
+                full_url = urljoin(BASE_URL, audio_url)
+                filename = audio_url.split('/')[-1].split('?')[0]
+                filename_lower = filename.lower()
+
+                # (Prevents cross-champion audio AND announcer files like "Announcer_ahri...")
+                if not filename_lower.startswith(champion_id):
+                    continue
+
+                # Use actual skin names from data-skin attributes
+                # This catches StarGuardian, KDA, PROJECT, etc. automatically
+                has_wrong_skin = any(
+                    skin_name.lower().replace(' ', '').replace('-', '') in filename_lower.replace('_', '').replace('-', '')
+                    for skin_name in non_original_skins
+                )
+                if has_wrong_skin:
+                    continue
+
+                audio_files.append(AudioFile(
+                    url=full_url,
+                    filename=filename,
+                    transcript=transcript,
+                ))
+        else:
+            # HAS SKIN VARIATIONS: Download ONLY Original skin audio
+            # Strategy: Find all inline-audio spans, check if next skin-play-button sibling has data-skin="Original"
+            inline_audio_spans = li.find_all('span', class_='inline-audio')
+
+            for inline_span in inline_audio_spans:
+                # Get the next sibling that's specifically a skin-play-button span
+                next_sibling = inline_span.find_next_sibling('span', class_='skin-play-button')
+
+                # Only proceed if this skin button is specifically "Original"
+                if next_sibling and next_sibling.get('data-skin') == 'Original':
+                    # This audio belongs to Original skin
+                    audio_tag = inline_span.find('audio')
+                    if not audio_tag:
+                        continue
+
+                    source = audio_tag.find('source')
+                    if not source or not source.get('src'):
+                        continue
+
+                    audio_url = source.get('src')
+                    full_url = urljoin(BASE_URL, audio_url)
+                    filename = audio_url.split('/')[-1].split('?')[0]
+                    filename_lower = filename.lower()
+
+                    # Prevents cross-champion audio AND announcer files like "Announcer_ahri..."
+                    if not filename_lower.startswith(champion_id):
+                        continue
+
+                    # Ensure filename doesn't contain non-Original skin names
+                    has_wrong_skin = any(
+                        skin_name.lower().replace(' ', '').replace('-', '') in filename_lower.replace('_', '').replace('-', '')
+                        for skin_name in non_original_skins
+                    )
+                    if has_wrong_skin:
+                        continue
+
+                    audio_files.append(AudioFile(
+                        url=full_url,
+                        filename=filename,
+                        transcript=transcript,
+                    ))
+
+        return audio_files
 
     def download_audio_file(
         self, audio_file: AudioFile, output_path: Path, champion_id: str
@@ -330,7 +374,7 @@ class WikiScraper:
                     continue
 
                 output_path = raw_dir / audio_file.filename
-                success = self.download_audio_file(audio_file, output_path, champion_id)
+                self.download_audio_file(audio_file, output_path, champion_id)
 
                 progress.update(task, advance=1)
 

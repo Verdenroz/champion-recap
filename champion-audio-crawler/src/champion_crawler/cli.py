@@ -247,7 +247,7 @@ def scrape(
     # Add champions to state
     for champ_name, _ in champions_to_process:
         champ_id = champ_name.lower().replace("'", "").replace(" ", "")
-        state.add_champion(champ_id, champ_name)
+        state.add_champion(champ_id)
 
     console.print(f"\n[cyan]Processing {len(champions_to_process)} champions...\n")
 
@@ -363,18 +363,44 @@ def resume_session(
     session = CrawlerSession(state)
     progress = state.load_progress()
 
+    # Get champion list from wiki to map IDs to names
+    console.print("[cyan]Fetching champion list from wiki...")
+    scraper = WikiScraper(state, output_dir)
+    all_champions = scraper.get_champion_list()
+
+    # Create champion_id -> (champion_name, audio_url) mapping
+    champion_map = {}
+    for champ_name, audio_url in all_champions:
+        champ_id = champ_name.lower().replace("'", "").replace(" ", "")
+        champion_map[champ_id] = (champ_name, audio_url)
+
     # Handle incomplete champion
     incomplete_champ = state.get_incomplete_champion()
 
+    console.print(f"[yellow]DEBUG: Incomplete champion: {incomplete_champ}")
+
     if incomplete_champ:
         checkpoint = state.get_champion_checkpoint(incomplete_champ)
-        if checkpoint:
-            console.print(f"[cyan]Resuming {checkpoint.champion_name} (stage: {checkpoint.stage.value})...")
 
-            audio_url = f"https://wiki.leagueoflegends.com/en-us/{checkpoint.champion_name}/Audio"
+        # Get champion info from map or checkpoint
+        if incomplete_champ in champion_map:
+            champ_name, audio_url = champion_map[incomplete_champ]
+        elif checkpoint:
+            champ_name = checkpoint.champion_name
+            audio_url = f"https://wiki.leagueoflegends.com/en-us/{champ_name}/Audio"
+        else:
+            console.print(f"[red]Cannot resume {incomplete_champ}: no checkpoint or wiki entry found")
+            champ_name = None
 
-            process_champion(
-                checkpoint.champion_name,
+        if champ_name:
+            if checkpoint:
+                console.print(f"[cyan]Resuming {champ_name} (stage: {checkpoint.stage.value})...")
+            else:
+                console.print(f"[cyan]Starting {champ_name} from beginning...")
+
+            console.print(f"[yellow]DEBUG: About to process {champ_name}...")
+            result = process_champion(
+                champ_name,
                 audio_url,
                 output_dir,
                 final_output_dir,
@@ -383,23 +409,28 @@ def resume_session(
                 sample_rate,
                 target_rms,
             )
+            console.print(f"[yellow]DEBUG: Process result: {result}")
 
     # Process pending champions
     pending = state.get_pending_champions()
+
+    console.print(f"[yellow]DEBUG: Found {len(pending) if pending else 0} pending champions")
 
     if pending:
         console.print(f"\n[cyan]Processing {len(pending)} pending champions...\n")
 
         for champion_id in pending:
             if not session.should_continue():
+                console.print(f"[yellow]DEBUG: Session shutdown requested, stopping")
                 break
 
-            checkpoint = state.get_champion_checkpoint(champion_id)
-            if checkpoint:
-                audio_url = f"https://wiki.leagueoflegends.com/en-us/{checkpoint.champion_name}/Audio"
+            # Get champion name from map
+            if champion_id in champion_map:
+                champ_name, audio_url = champion_map[champion_id]
+                console.print(f"[yellow]DEBUG: Processing {champ_name}...")
 
-                process_champion(
-                    checkpoint.champion_name,
+                result = process_champion(
+                    champ_name,
                     audio_url,
                     output_dir,
                     final_output_dir,
@@ -408,8 +439,12 @@ def resume_session(
                     sample_rate,
                     target_rms,
                 )
+                console.print(f"[yellow]DEBUG: {champ_name} result: {result}")
+            else:
+                console.print(f"[red]DEBUG: No wiki entry found for {champion_id}")
 
     # Final summary
+    console.print(f"[yellow]DEBUG: Generating final summary...")
     summary = state.get_status_summary()
     print_summary(summary)
 

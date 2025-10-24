@@ -68,15 +68,12 @@ class AudioProcessor:
             console.print(f"[red]Failed to convert {ogg_path.name}: {e}")
             return None
 
-    def apply_noise_reduction(
-        self, audio: np.ndarray, sr: int
-    ) -> np.ndarray:
+    def apply_noise_reduction(self, audio: np.ndarray) -> np.ndarray:
         """
         Apply noise reduction using Wiener filter.
 
         Args:
             audio: Audio signal as numpy array
-            sr: Sample rate
 
         Returns:
             Filtered audio signal
@@ -125,18 +122,18 @@ class AudioProcessor:
         """
         Process a single audio file through the complete pipeline.
 
-        Steps:
-        1. Load audio (convert from OGG if needed)
-        2. Apply noise reduction
-        3. Normalize volume
+        Pipeline steps:
+        1. Load audio (convert from OGG to WAV if needed)
+        2. Apply noise reduction (Wiener filter)
+        3. Normalize volume to target RMS level
         4. Save as WAV (22.05kHz, mono, 16-bit PCM)
 
         Args:
-            input_path: Path to input audio file
-            output_path: Path to output WAV file
+            input_path: Path to input audio file (OGG or WAV)
+            output_path: Path where output WAV file will be saved
 
         Returns:
-            ProcessingResult with success status and metadata
+            ProcessingResult with success status, duration, and error details if failed
         """
         try:
             # Convert OGG to WAV first if needed
@@ -158,13 +155,12 @@ class AudioProcessor:
             # Load audio
             audio, sr = librosa.load(str(load_path), sr=self.sample_rate, mono=True)
 
-            # Clean up temp file if created
-            if input_path.suffix.lower() == '.ogg' and load_path.exists():
-                if load_path.name.endswith('_temp.wav'):
-                    load_path.unlink()
+            # Clean up temp file if OGG conversion was used
+            if load_path != input_path and load_path.exists():
+                load_path.unlink()
 
             # Apply noise reduction
-            audio_filtered = self.apply_noise_reduction(audio, sr)
+            audio_filtered = self.apply_noise_reduction(audio)
 
             # Normalize volume
             audio_normalized = self.normalize_audio(audio_filtered)

@@ -10,7 +10,6 @@ from .models import (
     ProgressState,
     ChampionCheckpoint,
     ChampionStatus,
-    AudioFile,
 )
 
 
@@ -215,7 +214,7 @@ class StateManager:
 
         return needs_redownload
 
-    def add_champion(self, champion_id: str, champion_name: str):
+    def add_champion(self, champion_id: str):
         """Add champion to progress tracking."""
         if not self.progress:
             self.load_progress()

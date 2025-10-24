@@ -1,8 +1,7 @@
 """Audio concatenation for creating reference files."""
 
 from pathlib import Path
-from typing import List
-import json
+from typing import List, Optional
 
 import librosa
 import numpy as np
@@ -13,6 +12,22 @@ from .models import ChampionMetadata, ChampionCheckpoint, ChampionStatus, AudioF
 from .state_manager import StateManager
 
 console = Console()
+
+
+def is_valid_transcript(transcript: Optional[str]) -> bool:
+    """
+    Check if transcript is valid (not empty or placeholder).
+
+    Args:
+        transcript: Transcript text to validate
+
+    Returns:
+        True if transcript is valid, False if empty/placeholder
+    """
+    if not transcript:
+        return False
+    transcript_clean = transcript.strip()
+    return transcript_clean and transcript_clean != '[]'
 
 
 class AudioConcatenator:
@@ -94,14 +109,18 @@ class AudioConcatenator:
         """
         Extract only text within quotation marks from transcript.
 
-        Handles cases like: Come!" Aatrox grunts. "Destiny awaits!
-        Returns: Come! Destiny awaits!
+        This removes sound effect descriptions and narrator text, keeping only
+        the actual spoken dialogue.
+
+        Example:
+            Input:  'Come!" Aatrox grunts. "Destiny awaits!'
+            Output: 'Come! Destiny awaits!'
 
         Args:
-            text: Raw transcript text with possible sound effects
+            text: Raw transcript text with possible sound effects and narration
 
         Returns:
-            Only the quoted dialogue, concatenated
+            Only the quoted dialogue parts, joined with spaces
         """
         import re
 
@@ -139,45 +158,34 @@ class AudioConcatenator:
 
         # Create filename -> transcript mapping from audio_file_data
         # Match by OGG filename (without extension)
+        # ONLY include files with valid transcripts (skip empty/placeholder)
         transcript_map = {}
         for audio_data in audio_file_data:
             # OGG filename without extension
             ogg_stem = Path(audio_data.filename).stem
-            if audio_data.transcript:
+            if is_valid_transcript(audio_data.transcript):
                 # Extract only quoted dialogue, removing sound effects
                 clean_transcript = self._extract_quoted_text(audio_data.transcript)
                 transcript_map[ogg_stem] = clean_transcript
 
-        # Generate transcription lines
+        # Generate transcription lines (only for files that were passed in)
+        # Note: audio_files list has already been filtered by concatenate_champion()
         transcription_lines = []
-        missing_transcripts = 0
 
         for wav_path in audio_files:
             # WAV filename is same as OGG filename (just different extension)
             wav_stem = wav_path.stem
 
-            # Try to find matching transcript
+            # All files passed here should have valid transcripts
             if wav_stem in transcript_map:
                 transcription_lines.append(transcript_map[wav_stem])
-            else:
-                # Fallback to filename-based placeholder
-                missing_transcripts += 1
-                parts = wav_stem.split('_')
-                if len(parts) >= 3:
-                    text = ' '.join(parts[2:])
-                else:
-                    text = wav_stem
-                transcription_lines.append(f"[{text}]")  # Mark as placeholder
 
         # Write to file
         output_path.parent.mkdir(parents=True, exist_ok=True)
         transcription_text = '\n'.join(transcription_lines)
         output_path.write_text(transcription_text)
 
-        if missing_transcripts > 0:
-            console.print(f"[yellow]⚠ Note: {missing_transcripts} files have placeholder transcriptions (marked with []).")
-        else:
-            console.print("[green]✓ All voice lines transcribed from wiki data.")
+        console.print(f"[green]✓ Generated reference.txt with {len(transcription_lines)} voice lines")
 
         return output_path
 
@@ -242,10 +250,34 @@ class AudioConcatenator:
 
         try:
             # Get all processed WAV files
-            wav_files = sorted(processed_dir.glob("*.wav"))
+            all_wav_files = sorted(processed_dir.glob("*.wav"))
+
+            if not all_wav_files:
+                error = "No processed WAV files found"
+                console.print(f"[red]{error}")
+                self.state.mark_champion_failed(champion_id, error)
+                return False
+
+            # Filter out files with invalid transcripts (empty or placeholder)
+            # Create mapping of filename -> AudioFile data
+            audio_data_map = {Path(af.filename).stem: af for af in checkpoint.audio_files}
+
+            wav_files = []
+            skipped_count = 0
+
+            for wav_path in all_wav_files:
+                wav_stem = wav_path.stem
+                audio_data = audio_data_map.get(wav_stem)
+
+                if audio_data and is_valid_transcript(audio_data.transcript):
+                    wav_files.append(wav_path)
+                else:
+                    skipped_count += 1
+
+            console.print(f"[cyan]Using {len(wav_files)}/{len(all_wav_files)} files ({skipped_count} skipped due to missing transcripts)")
 
             if not wav_files:
-                error = "No processed WAV files found"
+                error = "No files with valid transcripts found"
                 console.print(f"[red]{error}")
                 self.state.mark_champion_failed(champion_id, error)
                 return False

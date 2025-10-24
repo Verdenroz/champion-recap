@@ -190,14 +190,12 @@ class WikiScraper:
             List of AudioFile objects (may be empty, or contain multiple files)
         """
         audio_files = []
+        champion_id = champion_name.lower().replace("'", "").replace(" ", "")
 
         # MUST have quotation marks (dialogue only)
         li_text = li.get_text()
         if '"' not in li_text and "'" not in li_text:
             return audio_files
-
-        # Generate champion ID for filename validation
-        champion_id = champion_name.lower().replace("'", "").replace(" ", "")
 
         # Check if this li has ANY data-skin spans
         skin_spans = li.find_all('span', {'data-skin': True})
@@ -228,10 +226,14 @@ class WikiScraper:
                 if not filename_lower.startswith(champion_id):
                     continue
 
-                # Use actual skin names from data-skin attributes
-                # This catches StarGuardian, KDA, PROJECT, etc. automatically
+                # Ensure filename doesn't contain non-Original skin names
+                # Extract the part after champion_id for skin name checking
+                filename_suffix = filename_lower[len(champion_id):]
+                # Remove "_original_" from the suffix to avoid false positives
+                filename_for_check = filename_suffix.replace('_original_', '_').replace('original', '')
+
                 has_wrong_skin = any(
-                    skin_name.lower().replace(' ', '').replace('-', '') in filename_lower.replace('_', '').replace('-', '')
+                    skin_name.lower().replace(' ', '').replace('-', '') in filename_for_check.replace('_', '').replace('-', '')
                     for skin_name in non_original_skins
                 )
                 if has_wrong_skin:
@@ -272,8 +274,15 @@ class WikiScraper:
                         continue
 
                     # Ensure filename doesn't contain non-Original skin names
+                    # Extract the part after champion_id for skin name checking
+                    # e.g., "Irelia_Original_Move_0.ogg" -> "Original_Move_0.ogg"
+                    filename_suffix = filename_lower[len(champion_id):]  # Remove champion prefix
+                    # Remove "_original_" from the suffix to avoid false positives
+                    # e.g., "Original_Move_0.ogg" -> "Move_0.ogg" (for checking against other skins)
+                    filename_for_check = filename_suffix.replace('_original_', '_').replace('original', '')
+
                     has_wrong_skin = any(
-                        skin_name.lower().replace(' ', '').replace('-', '') in filename_lower.replace('_', '').replace('-', '')
+                        skin_name.lower().replace(' ', '').replace('-', '') in filename_for_check.replace('_', '').replace('-', '')
                         for skin_name in non_original_skins
                     )
                     if has_wrong_skin:

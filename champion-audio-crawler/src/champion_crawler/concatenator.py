@@ -189,6 +189,67 @@ class AudioConcatenator:
 
         return output_path
 
+    def generate_list_file(
+        self,
+        audio_files: List[Path],
+        audio_file_data: List[AudioFile],
+        output_path: Path,
+        champion_id: str,
+        language: str = "en"
+    ) -> Path:
+        """
+        Generate GPT-SoVITS .list file for training.
+
+        The .list file format is:
+        {filename}|{speaker_name}|{language}|{transcript}
+
+        Args:
+            audio_files: List of processed WAV file paths (in order)
+            audio_file_data: List of AudioFile objects with transcript data
+            output_path: Output path for slicer_opt.list
+            champion_id: Champion identifier (used as speaker name)
+            language: Language code (default: "en")
+
+        Returns:
+            Path to slicer_opt.list file
+        """
+        console.print("[cyan]Generating GPT-SoVITS list file...")
+
+        # Create filename -> transcript mapping from audio_file_data
+        # Match by OGG filename (without extension)
+        # ONLY include files with valid transcripts (skip empty/placeholder)
+        transcript_map = {}
+        for audio_data in audio_file_data:
+            # OGG filename without extension
+            ogg_stem = Path(audio_data.filename).stem
+            if is_valid_transcript(audio_data.transcript):
+                # Extract only quoted dialogue, removing sound effects
+                clean_transcript = self._extract_quoted_text(audio_data.transcript)
+                transcript_map[ogg_stem] = clean_transcript
+
+        # Generate list entries (only for files that were passed in)
+        # Note: audio_files list has already been filtered by concatenate_champion()
+        list_entries = []
+
+        for wav_path in audio_files:
+            # WAV filename is same as OGG filename (just different extension)
+            wav_stem = wav_path.stem
+
+            # All files passed here should have valid transcripts
+            if wav_stem in transcript_map:
+                # Format: filename|speaker|language|transcript
+                list_entry = f"{wav_path.name}|{champion_id}|{language}|{transcript_map[wav_stem]}"
+                list_entries.append(list_entry)
+
+        # Write to file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        list_text = '\n'.join(list_entries)
+        output_path.write_text(list_text)
+
+        console.print(f"[green]✓ Generated slicer_opt.list with {len(list_entries)} entries")
+
+        return output_path
+
     def create_metadata_json(
         self,
         champion_id: str,
@@ -298,6 +359,10 @@ class AudioConcatenator:
             reference_txt_path = champion_output_dir / "reference.txt"
             self.generate_reference_txt(wav_files, checkpoint.audio_files, reference_txt_path)
 
+            # Generate slicer_opt.list for GPT-SoVITS training
+            list_file_path = champion_output_dir / "slicer_opt.list"
+            self.generate_list_file(wav_files, checkpoint.audio_files, list_file_path, champion_id)
+
             # Create metadata.json
             metadata_path = champion_output_dir / "metadata.json"
             self.create_metadata_json(
@@ -311,6 +376,7 @@ class AudioConcatenator:
             console.print(f"[green]✓ Successfully created reference files for {checkpoint.champion_name}")
             console.print(f"  - reference.wav: {total_duration:.2f}s ({len(wav_files)} clips)")
             console.print(f"  - reference.txt: {len(wav_files)} voice lines")
+            console.print(f"  - slicer_opt.list: {len(wav_files)} training entries")
             console.print(f"  - metadata.json: champion metadata")
 
             # Mark champion as completed

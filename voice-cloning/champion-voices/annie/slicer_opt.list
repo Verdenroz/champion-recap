@@ -1,8 +1,8 @@
-Annie_Original_Attack_0.wav|annie|en|I want a turn!
-Annie_Original_Attack_1.wav|annie|en|This is fun!
-Annie_Original_Attack_2.wav|annie|en|¿Onta bebé?, aquí está. Fuego.
-Annie_Original_Attack_3.wav|annie|en|Play time!
-Annie_Original_Attack_4.wav|annie|en|Take that!
+Annie_Ban.wav|annie|en|I want a turn!
+Annie_Original_Attack_0.wav|annie|en|This is fun!
+Annie_Original_Attack_1.wav|annie|en|¿Onta bebé?, aquí está. Fuego.
+Annie_Original_Attack_2.wav|annie|en|Play time!
+Annie_Original_Attack_3.wav|annie|en|Take that!
 Annie_Original_Attack_5.wav|annie|en|Don't make me hurt you!
 Annie_Original_Attack_6.wav|annie|en|I want a turn!
 Annie_Original_Attack_7.wav|annie|en|Sun, sun, burns you a little bit.
@@ -11,17 +11,17 @@ Annie_Original_Death_0.wav|annie|en|Agh...! Tibbers.
 Annie_Original_Death_1.wav|annie|en|Agh...! Tibbers.
 Annie_Original_Joke_0.wav|annie|en|What's your favorite aminal? A bear?
 Annie_Original_Joke_1.wav|annie|en|You smell like burning!
-Annie_Original_Move_0.wav|annie|en|Don't be a scaredy cat!
-Annie_Original_Move_1.wav|annie|en|Try to keep up!
-Annie_Original_Move_2.wav|annie|en|Are we there yet?
-Annie_Original_Move_3.wav|annie|en|I never play with matches.
-Annie_Original_Move_4.wav|annie|en|Have you seen my bear Tibbers?
-Annie_Original_Move_5.wav|annie|en|Hop, skip, jump!
-Annie_Original_Move_6.wav|annie|en|Tibbers!
-Annie_Original_Move_7.wav|annie|en|Get 'em, Tibbers!
-Annie_Original_R_0.wav|annie|en|Bear hug!
-Annie_Original_R_1.wav|annie|en|Yay, Tibbers!
-Annie_Original_R_3.wav|annie|en|Found him!
-Annie_Original_R_4.wav|annie|en|I will live, I will hit, still it's your turn to be it
-Annie_Original_R_5.wav|annie|en|You can't come to Tibbers' tea party! Bleh!
-Annie_Original_Taunt_0.wav|annie|en|You wanna play too? It'll be fun!
+Annie_Original_Move_1.wav|annie|en|Don't be a scaredy cat!
+Annie_Original_Move_2.wav|annie|en|Try to keep up!
+Annie_Original_Move_3.wav|annie|en|Are we there yet?
+Annie_Original_Move_4.wav|annie|en|I never play with matches.
+Annie_Original_Move_5.wav|annie|en|Have you seen my bear Tibbers?
+Annie_Original_Move_6.wav|annie|en|Hop, skip, jump!
+Annie_Original_R_0.wav|annie|en|Tibbers!
+Annie_Original_R_1.wav|annie|en|Get 'em, Tibbers!
+Annie_Original_R_3.wav|annie|en|Bear hug!
+Annie_Original_R_4.wav|annie|en|Yay, Tibbers!
+Annie_Original_R_5.wav|annie|en|Found him!
+Annie_Original_Taunt_1.wav|annie|en|I will live, I will hit, still it's your turn to beit
+Annie_Original_Taunt_2.wav|annie|en|You can't come to Tibbers' tea party! Bleh!
+Annie_Select.wav|annie|en|You wanna play too? It'll be fun!

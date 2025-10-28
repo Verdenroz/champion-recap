@@ -191,9 +191,8 @@ def scrape(
     if final_output:
         final_output_dir = Path(final_output)
     else:
-        # Default to ../voice-cloning/champion-voices relative to project root
-        project_root = Path(__file__).parent.parent.parent.parent
-        final_output_dir = project_root / "voice-cloning" / "champion-voices"
+        # Default to output/ directory in champion-audio-crawler
+        final_output_dir = output_dir.parent / "output"
 
     console.print(Panel.fit(
         "[bold cyan]League of Legends Champion Audio Crawler[/bold cyan]\n"
@@ -344,8 +343,8 @@ def resume(
     if final_output:
         final_output_dir = Path(final_output)
     else:
-        project_root = Path(__file__).parent.parent.parent.parent
-        final_output_dir = project_root / "voice-cloning" / "champion-voices"
+        # Default to output/ directory in champion-audio-crawler
+        final_output_dir = output_dir.parent / "output"
 
     resume_session(output_dir, final_output_dir, state, sample_rate, 10 ** (target_rms / 20.0))
 

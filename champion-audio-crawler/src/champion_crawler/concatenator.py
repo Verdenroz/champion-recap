@@ -1,11 +1,11 @@
-"""Audio dataset creation for voice cloning."""
+"""Audio concatenation for creating reference files."""
 
 from pathlib import Path
 from typing import List, Optional
-import csv
-import shutil
 
 import librosa
+import numpy as np
+import soundfile as sf
 from rich.console import Console
 
 from .models import ChampionMetadata, ChampionCheckpoint, ChampionStatus, AudioFile
@@ -30,31 +30,130 @@ def is_valid_transcript(transcript: Optional[str]) -> bool:
     return transcript_clean and transcript_clean != '[]'
 
 
-def get_audio_duration(audio_path: Path, sample_rate: int = 22050) -> float:
-    """
-    Get audio duration in seconds.
-
-    Args:
-        audio_path: Path to audio file
-        sample_rate: Target sample rate for loading
-
-    Returns:
-        Duration in seconds
-    """
-    audio, sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
-    return len(audio) / sr
-
-
 class AudioConcatenator:
-    """Creates datasets with individual audio files and metadata for voice cloning."""
+    """Concatenates processed audio files into reference file."""
 
     def __init__(
         self,
         state_manager: StateManager,
         sample_rate: int = 22050,
+        silence_duration: float = 0.3,  # 300ms silence between clips
     ):
         self.state = state_manager
         self.sample_rate = sample_rate
+        self.silence_duration = silence_duration
+
+    def find_longest_clip_under_20s(
+        self, wav_paths: List[Path], output_path: Path
+    ) -> tuple[Path, Path]:
+        """
+        Find the longest audio clip under 20 seconds and copy it as reference.
+
+        Args:
+            wav_paths: List of WAV file paths to search
+            output_path: Output path for reference WAV
+
+        Returns:
+            Tuple of (reference wav path, source wav path used)
+        """
+        console.print(f"[cyan]Finding longest audio clip under 20s from {len(wav_paths)} clips...")
+
+        max_duration = 20.0  # Maximum 20 seconds
+        longest_clip = None
+        longest_duration = 0.0
+        longest_audio = None
+        longest_sr = None
+
+        for wav_path in wav_paths:
+            try:
+                # Load audio
+                audio, sr = librosa.load(str(wav_path), sr=self.sample_rate, mono=True)
+
+                # Calculate duration
+                duration = len(audio) / sr
+
+                # Check if this is the longest clip under 20s
+                if duration < max_duration and duration > longest_duration:
+                    longest_duration = duration
+                    longest_clip = wav_path
+                    longest_audio = audio
+                    longest_sr = sr
+
+            except Exception as e:
+                console.print(f"[yellow]Failed to load {wav_path.name}: {e}")
+                continue
+
+        if longest_clip is None:
+            raise ValueError("No valid audio clips found under 20 seconds")
+
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save selected audio as reference
+        sf.write(
+            str(output_path),
+            longest_audio,
+            self.sample_rate,
+            subtype='PCM_16'
+        )
+
+        console.print(f"[green]Selected reference audio: {longest_clip.name} ({longest_duration:.2f}s)")
+
+        return output_path, longest_clip
+
+    def concatenate_wav_files(
+        self, wav_paths: List[Path], output_path: Path
+    ) -> Path:
+        """
+        Concatenate multiple WAV files with silence padding between clips.
+
+        Args:
+            wav_paths: List of WAV file paths to concatenate
+            output_path: Output path for concatenated WAV
+
+        Returns:
+            Path to concatenated WAV file
+        """
+        console.print(f"[cyan]Concatenating {len(wav_paths)} audio files...")
+
+        audio_segments = []
+        silence_samples = int(self.silence_duration * self.sample_rate)
+        silence = np.zeros(silence_samples, dtype=np.float32)
+
+        for wav_path in wav_paths:
+            try:
+                # Load audio
+                audio, sr = librosa.load(str(wav_path), sr=self.sample_rate, mono=True)
+                audio_segments.append(audio)
+                audio_segments.append(silence)  # Add silence between clips
+            except Exception as e:
+                console.print(f"[yellow]Failed to load {wav_path.name}: {e}")
+                continue
+
+        if not audio_segments:
+            raise ValueError("No valid audio files to concatenate")
+
+        # Remove last silence
+        if audio_segments:
+            audio_segments.pop()
+
+        # Concatenate all segments
+        concatenated = np.concatenate(audio_segments)
+
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save concatenated audio
+        sf.write(
+            str(output_path),
+            concatenated,
+            self.sample_rate,
+            subtype='PCM_16'
+        )
+
+        console.print(f"[green]✓ Concatenated audio saved ({len(concatenated) / self.sample_rate:.2f}s)")
+
+        return output_path
 
     def _extract_quoted_text(self, text: str) -> str:
         """
@@ -90,6 +189,87 @@ class AudioConcatenator:
 
         # If no quotes found, return original (shouldn't happen with our filters)
         return text
+
+    def generate_reference_txt(
+        self, selected_clip: Path, audio_file_data: List[AudioFile], output_path: Path
+    ) -> Path:
+        """
+        Generate reference transcription file from the selected clip's transcript.
+
+        Args:
+            selected_clip: The WAV file that was selected as reference
+            audio_file_data: List of AudioFile objects with transcript data
+            output_path: Output path for reference.txt
+
+        Returns:
+            Path to reference.txt file
+        """
+        console.print("[cyan]Generating reference transcription...")
+
+        # Find the transcript for the selected clip
+        clip_stem = selected_clip.stem
+
+        for audio_data in audio_file_data:
+            ogg_stem = Path(audio_data.filename).stem
+            if ogg_stem == clip_stem:
+                if is_valid_transcript(audio_data.transcript) and audio_data.transcript:
+                    # Extract only quoted dialogue, removing sound effects
+                    clean_transcript = self._extract_quoted_text(audio_data.transcript)
+
+                    # Write to file
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(clean_transcript)
+
+                    console.print(f"[green]✓ Generated reference.txt for {selected_clip.name}")
+                    return output_path
+                else:
+                    raise ValueError(f"Selected clip {selected_clip.name} has invalid transcript")
+
+        raise ValueError(f"No transcript found for selected clip {selected_clip.name}")
+
+    def generate_train_txt(
+        self, audio_files: List[Path], audio_file_data: List[AudioFile], output_path: Path
+    ) -> Path:
+        """
+        Generate train transcription file from all voice line texts (concatenated).
+
+        Args:
+            audio_files: List of processed WAV file paths (in order)
+            audio_file_data: List of AudioFile objects with transcript data
+            output_path: Output path for train.txt
+
+        Returns:
+            Path to train.txt file
+        """
+        console.print("[cyan]Generating train transcription...")
+
+        # Create filename -> transcript mapping from audio_file_data
+        transcript_map = {}
+        for audio_data in audio_file_data:
+            ogg_stem = Path(audio_data.filename).stem
+            if is_valid_transcript(audio_data.transcript) and audio_data.transcript:
+                # Extract only quoted dialogue, removing sound effects
+                clean_transcript = self._extract_quoted_text(audio_data.transcript)
+                transcript_map[ogg_stem] = clean_transcript
+
+        # Generate transcription lines (only for files that were passed in)
+        transcription_lines = []
+
+        for wav_path in audio_files:
+            wav_stem = wav_path.stem
+
+            if wav_stem in transcript_map:
+                transcription_lines.append(transcript_map[wav_stem])
+
+        # Write to file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        transcription_text = '\n'.join(transcription_lines)
+        output_path.write_text(transcription_text)
+
+        console.print(f"[green]✓ Generated train.txt with {len(transcription_lines)} voice lines")
+
+        return output_path
+
 
     def create_metadata_json(
         self,
@@ -132,37 +312,20 @@ class AudioConcatenator:
         checkpoint: ChampionCheckpoint,
         processed_dir: Path,
         final_output_dir: Path,
-        min_duration: float = 0.0,
-        max_duration: float = 12.0,
     ) -> bool:
         """
-        Create dataset for a champion with individual audio files and metadata.csv.
-
-        Creates this structure:
-        /champion_id/
-        |-- metadata.csv
-        |-- wavs/
-        |   |-- audio_0001.wav
-        |   |-- audio_0002.wav
-        |   `-- ...
-
-        metadata.csv format:
-        audio_file|text
-        wavs/audio_0001.wav|Transcript text here
-        wavs/audio_0002.wav|Another transcript
+        Select longest audio clip under 20s for a champion and create reference files.
 
         Args:
             champion_id: Champion identifier
             checkpoint: Champion checkpoint
             processed_dir: Directory with processed WAV files
-            final_output_dir: Final output directory (e.g., voice-cloning/champion-voices/)
-            min_duration: Minimum audio duration in seconds (default: 3.0)
-            max_duration: Maximum audio duration in seconds (default: 12.0)
+            final_output_dir: Base output directory (will create {champion_id}/ subdirectory)
 
         Returns:
             True if successful, False otherwise
         """
-        console.print(f"\n[cyan]Creating dataset for {checkpoint.champion_name}...")
+        console.print(f"\n[cyan]Creating reference files for {checkpoint.champion_name}...")
 
         # Update stage
         self.state.update_champion_stage(champion_id, ChampionStatus.CONCATENATING)
@@ -177,85 +340,74 @@ class AudioConcatenator:
                 self.state.mark_champion_failed(champion_id, error)
                 return False
 
-            # Create filename -> transcript mapping from audio_file_data
+            # Filter out files with invalid transcripts (empty or placeholder)
+            # Create mapping of filename -> AudioFile data
             audio_data_map = {Path(af.filename).stem: af for af in checkpoint.audio_files}
 
-            # Filter files by duration and valid transcript
-            valid_files = []  # (wav_path, duration, transcript)
-            
+            wav_files = []
+            skipped_count = 0
+
             for wav_path in all_wav_files:
                 wav_stem = wav_path.stem
                 audio_data = audio_data_map.get(wav_stem)
 
-                # Check if file has valid transcript
-                if not audio_data or not is_valid_transcript(audio_data.transcript):
-                    continue
+                if audio_data and is_valid_transcript(audio_data.transcript):
+                    wav_files.append(wav_path)
+                else:
+                    skipped_count += 1
 
-                # Check duration
-                duration = get_audio_duration(wav_path, self.sample_rate)
-                
-                if min_duration <= duration <= max_duration:
-                    # audio_data.transcript is guaranteed to be valid here
-                    if audio_data.transcript:  # Type narrowing for mypy
-                        clean_transcript = self._extract_quoted_text(audio_data.transcript)
-                        valid_files.append((wav_path, duration, clean_transcript))
+            console.print(f"[cyan]Using {len(wav_files)}/{len(all_wav_files)} files ({skipped_count} skipped due to missing transcripts)")
 
-            if not valid_files:
-                error = f"No clips found with duration {min_duration}-{max_duration}s and valid transcript"
+            if not wav_files:
+                error = "No files with valid transcripts found"
                 console.print(f"[red]{error}")
                 self.state.mark_champion_failed(champion_id, error)
                 return False
 
-            console.print(f"[cyan]✓ Found {len(valid_files)} valid audio clips ({min_duration}-{max_duration}s)")
-
-            # Ensure final output directory exists
+            # Ensure output directory exists ({champion_id}/)
             champion_output_dir = final_output_dir / champion_id
-            wavs_dir = champion_output_dir / "wavs"
-            wavs_dir.mkdir(parents=True, exist_ok=True)
+            champion_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy files to wavs/ directory with sequential naming
-            metadata_rows = []
-            total_duration = 0.0
+            # 1. Find longest clip under 20 seconds for reference
+            reference_wav_path = champion_output_dir / "reference.wav"
+            selected_wav, source_clip = self.find_longest_clip_under_20s(wav_files, reference_wav_path)
 
-            for idx, (wav_path, duration, transcript) in enumerate(valid_files, start=1):
-                # Create sequential filename
-                new_filename = f"audio_{idx:04d}.wav"
-                new_path = wavs_dir / new_filename
+            # Calculate duration of selected clip
+            audio, sr = librosa.load(str(selected_wav), sr=None, mono=True)
+            reference_duration = len(audio) / sr
 
-                # Copy file
-                shutil.copy2(wav_path, new_path)
+            # Generate reference.txt with transcript from selected clip
+            reference_txt_path = champion_output_dir / "reference.txt"
+            self.generate_reference_txt(source_clip, checkpoint.audio_files, reference_txt_path)
 
-                # Add to metadata
-                relative_path = f"wavs/{new_filename}"
-                metadata_rows.append({
-                    "audio_file": relative_path,
-                    "text": transcript
-                })
+            # 2. Concatenate all clips for training
+            train_wav_path = champion_output_dir / "train.wav"
+            self.concatenate_wav_files(wav_files, train_wav_path)
 
-                total_duration += duration
+            # Calculate total duration of concatenated training audio
+            train_audio, train_sr = librosa.load(str(train_wav_path), sr=None, mono=True)
+            train_duration = len(train_audio) / train_sr
 
-            # Write metadata.csv
-            metadata_csv_path = champion_output_dir / "metadata.csv"
-            with open(metadata_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=['audio_file', 'text'], delimiter='|')
-                writer.writeheader()
-                writer.writerows(metadata_rows)
+            # Generate train.txt with all transcripts
+            train_txt_path = champion_output_dir / "train.txt"
+            self.generate_train_txt(wav_files, checkpoint.audio_files, train_txt_path)
 
-            console.print(f"[green]✓ Successfully created dataset for {checkpoint.champion_name}")
-            console.print(f"  - {len(valid_files)} audio files in wavs/")
-            console.print(f"  - Total duration: {total_duration:.2f}s")
-            console.print(f"  - Average duration: {total_duration/len(valid_files):.2f}s")
-            console.print(f"  - metadata.csv created")
-
-            # Create metadata.json for backwards compatibility
+            # Create metadata.json
             metadata_path = champion_output_dir / "metadata.json"
             self.create_metadata_json(
                 champion_id=champion_id,
                 champion_name=checkpoint.champion_name,
-                total_clips=len(valid_files),
-                total_duration=total_duration,
+                total_clips=len(wav_files),
+                total_duration=train_duration,
                 output_path=metadata_path,
             )
+
+            console.print(f"[green]✓ Successfully created reference and training files for {checkpoint.champion_name}")
+            console.print(f"  - reference.wav: {reference_duration:.2f}s (from {source_clip.name})")
+            console.print(f"  - reference.txt: single clip transcription")
+            console.print(f"  - train.wav: {train_duration:.2f}s ({len(wav_files)} clips)")
+            console.print(f"  - train.txt: {len(wav_files)} voice lines")
+            console.print(f"  - metadata.json: champion metadata")
 
             # Mark champion as completed
             self.state.mark_champion_completed(champion_id)
@@ -263,9 +415,7 @@ class AudioConcatenator:
             return True
 
         except Exception as e:
-            error = f"Dataset creation failed: {e}"
+            error = f"Reference creation failed: {e}"
             console.print(f"[red]{error}")
-            import traceback
-            console.print(f"[red]{traceback.format_exc()}")
             self.state.mark_champion_failed(champion_id, error)
             return False

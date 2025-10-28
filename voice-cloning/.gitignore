@@ -63,6 +63,9 @@ huggingface/
 *.flac
 !champion-voices/*/reference.wav
 
+# Ignore wavs/ directories in champion-voices
+champion-voices/*/wavs/
+
 # Test output
 test-output/
 test_*.wav
@@ -91,6 +94,8 @@ tmp/
 datasets/
 raw_audio/
 processed_audio/
+champion-models/
+
 
 # Python environment metadata
 pip-log.txt

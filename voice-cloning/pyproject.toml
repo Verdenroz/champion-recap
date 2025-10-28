@@ -1,21 +1,69 @@
 [project]
 name = "champion-recap-voice-cloning"
-version = "0.1.0"
-description = "Dynamic voice generation for Champion Recap using F5-TTS"
+version = "0.3.0"
+description = "Dynamic voice generation for Champion Recap using GPT-SoVITS"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+    # Core ML dependencies (PyTorch)
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "torchaudio>=2.0.0",
-    "f5-tts>=1.1.9",
-    "librosa>=0.10.0",
+    "torchcodec>=0.8.0",
+    # GPT-SoVITS core dependencies
+    "numpy<2.0",
+    "scipy",
+    "tensorboard",
+    "librosa==0.10.2",
+    "numba",
+    "pytorch-lightning>=2.4",
+    "gradio>=4.0,<5.0",
+    "ffmpeg-python",
+    "onnxruntime-gpu; platform_machine == 'x86_64' or platform_machine == 'AMD64'",
+    "onnxruntime; platform_machine == 'aarch64' or platform_machine == 'arm64'",
+    "tqdm",
+    # GPT-SoVITS ASR & text processing
+    "funasr==1.0.27",
+    "cn2an",
+    "pypinyin",
+    "pyopenjtalk>=0.4.1",
+    "g2p_en",
+    "sentencepiece",
+    "transformers>=4.43,<=4.50",
+    "peft",
+    "chardet",
+    "PyYAML",
+    "jieba_fast",
+    "jieba",
+    "split-lang",
+    "fast_langdetect>=0.3.1",
+    "wordsegment",
+    "ToJyutping",
+    "g2pk2",
+    "ko_pron",
+    "opencc",
+    "python_mecab_ko; sys_platform != 'win32'",
+    # GPT-SoVITS model dependencies
+    "modelscope==1.10.0",
+    "rotary_embedding_torch",
+    "x_transformers",
+    "torchmetrics<=1.5",
+    "ctranslate2>=4.0,<5",
+    "huggingface_hub>=0.13",
+    "tokenizers>=0.13,<1",
+    # API & server
+    "fastapi[standard]>=0.115.2",
+    "pydantic<=2.10.6",
+    # Audio/video processing
     "soundfile>=0.12.0",
     "pydub>=0.25.0",
+    "av>=11",
+    # Additional utilities
+    "psutil",
+    "noisereduce>=3.0.0",
+    "pyloudnorm>=0.1.0",
+    # AWS integration
     "boto3>=1.28.0",
-    "tqdm>=4.65.0",
-    "numpy>=1.24.0,<2.0.0",
-    "torchcodec>=0.8.0",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +75,10 @@ dev = [
 ]
 
 [project.scripts]
-generate-voice = "scripts.generate_dynamic_voice:main"
+# GPT-SoVITS voice generation
+generate-voice = "scripts.test_gptsovits_inference:main"
+generate-list-file = "scripts.generate_list_file:main"
+clean-audio = "scripts.clean_champion_audio:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -63,16 +63,13 @@ export const GET: RequestHandler = async ({ url }) => {
 					)
 				);
 
-				// Step 2: Poll for progressive results
-				let attempts = 0;
-				const maxAttempts = 60; // 60 attempts over ~3-4 minutes (for large match histories)
+				// Step 2: Poll for progressive results until complete
+				// Poll at a consistent rate (every 5 seconds) until processing is complete
+				const pollInterval = 5000; // 5 seconds between polls
 
-				// Poll for results
-				while (attempts < maxAttempts) {
-					attempts++;
-					// Start with 2 seconds, then add 200ms per attempt (max ~10s between polls)
-					const delay = Math.min(2000 + attempts * 200, 10000);
-					await new Promise((resolve) => setTimeout(resolve, delay));
+				// Poll indefinitely until complete
+				while (true) {
+					await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
 					// First, check player status for progress info
 					const playerUrl = `${PUBLIC_AWS_API_URL}/player/status?puuid=${puuid}&year=${year}`;
@@ -130,16 +127,12 @@ export const GET: RequestHandler = async ({ url }) => {
 							encoder.encode(
 								`data: ${JSON.stringify({
 									type: 'progress',
-									message: `Processing matches... (${attempts}/${maxAttempts})`,
-									attempt: attempts
+									message: `Processing matches...`
 								})}\n\n`
 							)
 						);
 					}
 				}
-
-				// Timeout
-				throw new Error('Processing timeout - please try again');
 			} catch (error) {
 				console.error('Error in progressive data fetch:', error);
 

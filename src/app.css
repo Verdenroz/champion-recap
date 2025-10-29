@@ -1,1 +1,349 @@
 @import "tailwindcss";
+
+/* Import geometric sans-serif fonts similar to Sharp Sans/Riot Sans */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Montserrat:wght@700;800;900&display=swap');
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Primary Color - League of Legends Gold/Okra (#C4A15B) */
+  --color-primary-50: #faf8f3;
+  --color-primary-100: #f4f0e5;
+  --color-primary-200: #eddc91;
+  --color-primary-300: #d9c577;
+  --color-primary-400: #c4a15b;
+  --color-primary-500: #c4a15b;
+  --color-primary-600: #a88849;
+  --color-primary-700: #8b6f3a;
+  --color-primary-800: #6f562c;
+  --color-primary-900: #523d1e;
+
+  /* Secondary Color - League Blue (#548CB4) */
+  --color-secondary-50: #f0f6fa;
+  --color-secondary-100: #dceaf3;
+  --color-secondary-200: #b8d5e7;
+  --color-secondary-300: #8ebfd8;
+  --color-secondary-400: #548cb4;
+  --color-secondary-500: #548cb4;
+  --color-secondary-600: #4576a0;
+  --color-secondary-700: #386087;
+  --color-secondary-800: #2b4a6d;
+  --color-secondary-900: #1e3454;
+}
+
+@layer base {
+  /* disable chrome cancel button */
+  input[type="search"]::-webkit-search-cancel-button {
+    display: none;
+  }
+}
+
+/* Custom CSS Variables */
+:root {
+  /* League of Legends Brand Colors */
+  --color-primary-light: #eddc91; /* Light Yellow/Gold Accent */
+  --color-primary-glow: rgba(196, 161, 91, 0.4);
+  --color-league-gold: #c4a15b; /* Official Gold/Okra */
+  --color-league-gold-light: #eddc91;
+  --color-league-blue: #548cb4; /* Official Blue */
+  --color-league-blue-bright: #6aa4d4; /* Brighter blue for accents */
+
+  /* Background Colors */
+  --color-bg-primary: #000000;
+  --color-bg-secondary: #0a0a0a;
+  --color-bg-tertiary: #141414;
+  --color-bg-card: rgba(20, 20, 20, 0.8);
+
+  /* Text Colors */
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #a0a0a0;
+  --color-text-muted: #666666;
+
+  /* Accent Colors */
+  --color-success: #00ff88;
+  --color-warning: #c4a15b; /* Gold for warning/processing states */
+  --color-error: #ff4444;
+}
+
+/* Global Styles */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  /* Using geometric sans-serif fonts similar to Sharp Sans/Riot Sans */
+  font-family: 'Inter', 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary-500);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary-light);
+}
+
+/* Animated Background Pattern */
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animated-bg {
+  /* Updated to use League's gold/blue palette instead of generic teal */
+  background: linear-gradient(-45deg, #000000, #0a0a0a, #1a1206, #000814);
+  background-size: 400% 400%;
+  animation: gradient-shift 15s ease infinite;
+}
+
+/* Glow Effects */
+.glow-primary {
+  box-shadow: 0 0 20px var(--color-primary-glow);
+}
+
+.glow-primary-hover:hover {
+  box-shadow: 0 0 30px var(--color-primary-glow);
+}
+
+/* Shimmer Effect for Loading */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.shimmer {
+  animation: shimmer 2s infinite linear;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 1000px 100%;
+}
+
+/* Card Hover Effects */
+.card-hover {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  will-change: transform;
+}
+
+.card-hover:hover {
+  transform: translate3d(0, -4px, 0);
+  /* Updated glow from teal to League gold */
+  box-shadow: 0 10px 40px rgba(196, 161, 91, 0.25);
+}
+
+/* Gradient Text - League Gold to Blue */
+.gradient-text {
+  /* Updated from generic purple to League's signature gold-to-blue gradient */
+  background: linear-gradient(135deg, var(--color-league-gold), var(--color-league-gold-light), var(--color-league-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Focus Styles */
+*:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: var(--color-primary-500);
+  color: white;
+}
+
+/* Particle System */
+@keyframes float {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.2;
+  }
+  50% {
+    transform: translate3d(10px, -20px, 0);
+    opacity: 0.4;
+  }
+}
+
+.particle {
+  position: absolute;
+  background: var(--color-primary-500);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: float var(--duration, 4s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+  opacity: 0.2;
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
+}
+
+/* Gaming Card Effects */
+@keyframes card-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(196, 161, 91, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(196, 161, 91, 0.35);
+  }
+}
+
+.card-gaming {
+  position: relative;
+  overflow: hidden;
+}
+
+.card-gaming::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  right: -2px;
+  bottom: -2px;
+  background: linear-gradient(45deg, transparent, var(--color-primary-500), transparent);
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: -1;
+}
+
+.card-gaming:hover::before {
+  opacity: 0.3;
+}
+
+/* Stats Ticker Animation */
+@keyframes ticker-scroll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.ticker-scroll {
+  animation: ticker-scroll 25s linear infinite;
+  will-change: transform;
+}
+
+/* Hexagon Pattern - Updated to gold tones */
+.hex-pattern {
+  background-image:
+    linear-gradient(30deg, rgba(196, 161, 91, 0.02) 12%, transparent 12.5%, transparent 87%, rgba(196, 161, 91, 0.02) 87.5%, rgba(196, 161, 91, 0.02)),
+    linear-gradient(150deg, rgba(196, 161, 91, 0.02) 12%, transparent 12.5%, transparent 87%, rgba(196, 161, 91, 0.02) 87.5%, rgba(196, 161, 91, 0.02)),
+    linear-gradient(30deg, rgba(196, 161, 91, 0.02) 12%, transparent 12.5%, transparent 87%, rgba(196, 161, 91, 0.02) 87.5%, rgba(196, 161, 91, 0.02)),
+    linear-gradient(150deg, rgba(196, 161, 91, 0.02) 12%, transparent 12.5%, transparent 87%, rgba(196, 161, 91, 0.02) 87.5%, rgba(196, 161, 91, 0.02)),
+    linear-gradient(60deg, rgba(196, 161, 91, 0.04) 25%, transparent 25.5%, transparent 75%, rgba(196, 161, 91, 0.04) 75%, rgba(196, 161, 91, 0.04)),
+    linear-gradient(60deg, rgba(196, 161, 91, 0.04) 25%, transparent 25.5%, transparent 75%, rgba(196, 161, 91, 0.04) 75%, rgba(196, 161, 91, 0.04));
+  background-size: 80px 140px;
+  background-position: 0 0, 0 0, 40px 70px, 40px 70px, 0 0, 40px 70px;
+}
+
+/* Pulse Animation */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.pulse-glow {
+  animation: pulse-glow 3s ease-in-out infinite;
+}
+
+/* Icon Bounce */
+@keyframes icon-bounce {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -5px, 0);
+  }
+}
+
+.icon-bounce:hover {
+  animation: icon-bounce 0.5s ease-in-out;
+}
+
+/* Stat Counter Animation */
+@keyframes count-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.stat-count {
+  animation: count-up 0.5s ease-out;
+  will-change: transform, opacity;
+}
+
+/* Glitch Effect for Headers - Updated to gold/blue */
+@keyframes glitch {
+  0% {
+    text-shadow: 0.05em 0 0 rgba(196, 161, 91, 0.75),
+                 -0.05em -0.025em 0 rgba(84, 140, 180, 0.75);
+  }
+  14% {
+    text-shadow: 0.05em 0 0 rgba(196, 161, 91, 0.75),
+                 -0.05em -0.025em 0 rgba(84, 140, 180, 0.75);
+  }
+  15% {
+    text-shadow: -0.05em -0.025em 0 rgba(196, 161, 91, 0.75),
+                 0.05em 0.025em 0 rgba(84, 140, 180, 0.75);
+  }
+  49% {
+    text-shadow: -0.05em -0.025em 0 rgba(196, 161, 91, 0.75),
+                 0.05em 0.025em 0 rgba(84, 140, 180, 0.75);
+  }
+  50% {
+    text-shadow: 0.025em 0.05em 0 rgba(196, 161, 91, 0.75),
+                 0.05em 0 0 rgba(84, 140, 180, 0.75);
+  }
+  99% {
+    text-shadow: 0.025em 0.05em 0 rgba(196, 161, 91, 0.75),
+                 0.05em 0 0 rgba(84, 140, 180, 0.75);
+  }
+  100% {
+    text-shadow: -0.025em 0 0 rgba(196, 161, 91, 0.75),
+                 -0.025em -0.025em 0 rgba(84, 140, 180, 0.75);
+  }
+}

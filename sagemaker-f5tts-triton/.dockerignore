@@ -1,5 +1,4 @@
 *.md
-*.sh
 .git
 .gitignore
 *.pyc

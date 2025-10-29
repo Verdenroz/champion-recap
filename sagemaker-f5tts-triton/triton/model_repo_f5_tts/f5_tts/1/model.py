@@ -25,7 +25,9 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 import json
 import os
+import io
 
+import boto3
 import jieba
 import torch
 import torchaudio
@@ -122,6 +124,12 @@ class TritonPythonModel:
         self.reference_sample_rate = int(parameters["reference_audio_sample_rate"])
         self.resampler = torchaudio.transforms.Resample(self.reference_sample_rate, self.target_audio_sample_rate)
 
+        # S3 integration for champion voice loading
+        self.s3_client = boto3.client('s3')
+        self.voice_bucket = parameters.get("voice_bucket", "champion-recap-voices")
+        self.champion_cache = {}  # Cache: {champion_id: {"wav": tensor, "text": str, "sample_rate": int}}
+        print(f"[F5-TTS] S3 voice bucket configured: {self.voice_bucket}")
+
         self.tllm_model_dir = parameters["tllm_model_dir"]
         config_file = os.path.join(self.tllm_model_dir, "config.json")
         with open(config_file) as f:
@@ -151,6 +159,56 @@ class TritonPythonModel:
             self.compute_mel_fn = self.get_vocos_mel_spectrogram
         elif self.vocoder == "bigvgan":
             self.compute_mel_fn = self.get_bigvgan_mel_spectrogram
+
+    def load_champion_voice(self, champion_id: str):
+        """
+        Load champion reference audio and text from S3 with caching.
+
+        Args:
+            champion_id: Champion identifier (e.g., 'yasuo', 'ahri')
+
+        Returns:
+            dict: {"wav": tensor, "text": str, "sample_rate": int}
+        """
+        # Check cache first
+        if champion_id in self.champion_cache:
+            print(f"[F5-TTS] Cache hit for champion: {champion_id}")
+            return self.champion_cache[champion_id]
+
+        print(f"[F5-TTS] Loading champion voice from S3: {champion_id}")
+
+        try:
+            # S3 paths
+            wav_key = f"champion-voices/{champion_id}/reference.wav"
+            txt_key = f"champion-voices/{champion_id}/reference.txt"
+
+            # Download WAV from S3
+            print(f"[F5-TTS] Downloading: s3://{self.voice_bucket}/{wav_key}")
+            wav_obj = self.s3_client.get_object(Bucket=self.voice_bucket, Key=wav_key)
+            wav_bytes = wav_obj['Body'].read()
+
+            # Load audio tensor from bytes
+            wav, sr = torchaudio.load(io.BytesIO(wav_bytes))
+
+            # Download text from S3
+            print(f"[F5-TTS] Downloading: s3://{self.voice_bucket}/{txt_key}")
+            txt_obj = self.s3_client.get_object(Bucket=self.voice_bucket, Key=txt_key)
+            reference_text = txt_obj['Body'].read().decode('utf-8').strip()
+
+            # Cache for future requests
+            self.champion_cache[champion_id] = {
+                "wav": wav,
+                "text": reference_text,
+                "sample_rate": sr
+            }
+
+            print(f"[F5-TTS] Successfully loaded {champion_id}: wav shape={wav.shape}, sr={sr}, text_len={len(reference_text)}")
+            return self.champion_cache[champion_id]
+
+        except Exception as e:
+            error_msg = f"Failed to load champion voice for '{champion_id}': {str(e)}"
+            print(f"[F5-TTS ERROR] {error_msg}")
+            raise pb_utils.TritonModelException(error_msg)
 
     def get_vocos_mel_spectrogram(self, waveform):
         mel = self.mel_stft(waveform)
@@ -186,31 +244,74 @@ class TritonPythonModel:
         if self.use_perf:
             torch.cuda.nvtx.range_push("preprocess")
         for request in requests:
-            wav_tensor = pb_utils.get_input_tensor_by_name(request, "reference_wav")
-            wav_lens = pb_utils.get_input_tensor_by_name(request, "reference_wav_len")
+            # Extract champion_id first
+            champion_id_tensor = pb_utils.get_input_tensor_by_name(request, "champion_id")
+            if champion_id_tensor is None:
+                raise pb_utils.TritonModelException("Missing required input: champion_id")
 
-            reference_text = pb_utils.get_input_tensor_by_name(request, "reference_text").as_numpy()
-            reference_text = reference_text[0][0].decode("utf-8")
-            reference_text_list.append(reference_text)
-            target_text = pb_utils.get_input_tensor_by_name(request, "target_text").as_numpy()
-            target_text = target_text[0][0].decode("utf-8")
+            champion_id = champion_id_tensor.as_numpy()[0][0].decode("utf-8")
+            print(f"[F5-TTS] Processing request for champion: {champion_id}")
+
+            # Get target text (always required)
+            target_text_tensor = pb_utils.get_input_tensor_by_name(request, "target_text")
+            if target_text_tensor is None:
+                raise pb_utils.TritonModelException("Missing required input: target_text")
+
+            target_text = target_text_tensor.as_numpy()[0][0].decode("utf-8")
             target_text_list.append(target_text)
 
+            # Check if reference_wav is provided
+            wav_tensor = pb_utils.get_input_tensor_by_name(request, "reference_wav")
+
+            if wav_tensor is None:
+                # Load from S3 using champion_id
+                print(f"[F5-TTS] No reference_wav provided, loading from S3 for {champion_id}")
+                champion_voice = self.load_champion_voice(champion_id)
+                wav = champion_voice["wav"]
+                reference_text = champion_voice["text"]
+                sr = champion_voice["sample_rate"]
+
+                # Ensure wav is in correct shape (1, N)
+                if wav.dim() == 1:
+                    wav = wav.unsqueeze(0)
+                assert wav.shape[0] == 1, f"Expected mono audio, got shape {wav.shape}"
+
+            else:
+                # Use provided reference (for custom voices or testing)
+                print(f"[F5-TTS] Using provided reference_wav for {champion_id}")
+                wav_lens = pb_utils.get_input_tensor_by_name(request, "reference_wav_len")
+
+                reference_text_tensor = pb_utils.get_input_tensor_by_name(request, "reference_text")
+                if reference_text_tensor is None:
+                    raise pb_utils.TritonModelException("reference_text required when reference_wav is provided")
+
+                reference_text = reference_text_tensor.as_numpy()[0][0].decode("utf-8")
+
+                wav = from_dlpack(wav_tensor.to_dlpack())
+                wav_len = from_dlpack(wav_lens.to_dlpack())
+                wav_len = wav_len.squeeze()
+                assert wav.shape[0] == 1, "Only support batch size 1 for now."
+                wav = wav[:, :wav_len]
+                sr = self.reference_sample_rate
+
+            reference_text_list.append(reference_text)
             text = reference_text + target_text
             reference_target_texts_list.append(text)
-
-            wav = from_dlpack(wav_tensor.to_dlpack())
-            wav_len = from_dlpack(wav_lens.to_dlpack())
-            wav_len = wav_len.squeeze()
-            assert wav.shape[0] == 1, "Only support batch size 1 for now."
-            wav = wav[:, :wav_len]
 
             ref_rms = torch.sqrt(torch.mean(torch.square(wav)))
             if ref_rms < self.target_rms:
                 wav = wav * self.target_rms / ref_rms
             reference_rms_list.append(ref_rms)
-            if self.reference_sample_rate != self.target_audio_sample_rate:
-                wav = self.resampler(wav)
+
+            # Resample if needed (sr is from S3 or self.reference_sample_rate)
+            if sr != self.target_audio_sample_rate:
+                # Create resampler for this specific sample rate if different from default
+                if sr != self.reference_sample_rate:
+                    temp_resampler = torchaudio.transforms.Resample(sr, self.target_audio_sample_rate)
+                    wav = temp_resampler(wav)
+                else:
+                    wav = self.resampler(wav)
+
             wav = wav.to(self.device)
             if self.use_perf:
                 torch.cuda.nvtx.range_push("compute_mel")

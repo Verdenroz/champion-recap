@@ -303,6 +303,17 @@ export async function getChampionNameById(championId: number): Promise<string> {
 }
 
 /**
+ * Get all champion IDs from cache
+ * Returns champion IDs like ["Aatrox", "Ahri", "Akali", ...]
+ */
+export function getAllChampionIds(): string[] {
+	if (!cache.champions) {
+		return [];
+	}
+	return Object.keys(cache.champions);
+}
+
+/**
  * Preload all static data including version
  * Call this on app initialization to cache all data
  */

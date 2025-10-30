@@ -1,13 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getChampionIconUrl, getAllChampionIds } from '$lib/data-dragon';
-
-	// Fallback champions if cache not ready
-	const fallbackChampions = [
-		'Yasuo', 'Ahri', 'Jinx', 'Zed', 'Lux', 'Thresh',
-		'LeeSin', 'Akali', 'Ezreal', 'Katarina', 'Vayne', 'Jhin',
-		'Riven', 'Draven', 'Teemo', 'Blitzcrank'
-	];
+	import { getChampionIconUrl, getAllChampions, type ChampionData } from '$lib/data-dragon';
 
 	// Fisher-Yates shuffle algorithm
 	function shuffleArray<T>(array: T[]): T[] {
@@ -19,12 +12,12 @@
 		return shuffled;
 	}
 
-	let champions = $state<string[]>([]);
+	let champions = $state<ChampionData[]>([]);
 	let extendedChampions = $derived([...champions, ...champions, ...champions]);
 
 	let isSpinning = $state(false);
 	let selectedIndex = $state(0);
-	let highlightedChampion = $state<string | null>(null);
+	let highlightedChampion = $state<ChampionData | null>(null);
 	let imageErrors = $state<Set<string>>(new Set());
 
 	const iconSize = 96;
@@ -41,13 +34,13 @@
 		return Math.floor(Math.random() * champions.length);
 	}
 
-	function handleImageError(champion: string) {
-		console.error(`Failed to load image for ${champion}:`, getChampionIconUrl(champion));
-		imageErrors = new Set([...imageErrors, champion]);
+	function handleImageError(championId: string) {
+		console.error(`Failed to load image for ${championId}:`, getChampionIconUrl(championId));
+		imageErrors = new Set([...imageErrors, championId]);
 	}
 
-	function getChampionImageUrl(champion: string): string {
-		const url = getChampionIconUrl(champion);
+	function getChampionImageUrl(championId: string): string {
+		const url = getChampionIconUrl(championId);
 		return url;
 	}
 
@@ -107,18 +100,17 @@
 	}
 
 	onMount(() => {
-		// Get all champion IDs from Data Dragon cache
-		const allChampionIds = getAllChampionIds();
-		const championList = allChampionIds.length > 0 ? allChampionIds : fallbackChampions;
+		// Get all champions with IDs and names from Data Dragon cache
+		const allChampions = getAllChampions();
 
-		champions = shuffleArray(championList);
+		champions = shuffleArray(allChampions);
 		selectedIndex = champions.length; // Start in the middle set
 
 		// Preload champion icons with error handling
 		champions.forEach((champion) => {
 			const img = new Image();
-			img.src = getChampionIconUrl(champion);
-			img.onerror = () => handleImageError(champion);
+			img.src = getChampionIconUrl(champion.id);
+			img.onerror = () => handleImageError(champion.id);
 		});
 
 		// Initial highlight
@@ -155,23 +147,23 @@
 					{isSpinning ? 'filter: blur(4px);' : ''}
 				"
 			>
-				{#each extendedChampions as champion, i (`${champion}-${i}`)}
+				{#each extendedChampions as champion, i (`${champion.id}-${i}`)}
 					{@const isSelected = !isSpinning && Math.floor(visualOffset) === i}
 					<div
 						class="w-24 h-24 rounded-lg overflow-hidden border-2 transition-all duration-300 flex-shrink-0 bg-gray-900/50 transform-gpu {isSelected ? 'border-primary-400 scale-110 shadow-2xl shadow-primary-500' : 'border-gray-700/50'}"
 						style="transform-origin: center center;"
 					>
-						{#if imageErrors.has(champion)}
+						{#if imageErrors.has(champion.id)}
 							<!-- Fallback for failed images -->
 							<div class="w-full h-full flex items-center justify-center bg-gray-800">
-								<span class="text-primary-300 text-xs font-bold">{champion.slice(0, 3).toUpperCase()}</span>
+								<span class="text-primary-300 text-xs font-bold">{champion.name.slice(0, 3).toUpperCase()}</span>
 							</div>
 						{:else}
 							<img
-								src={getChampionImageUrl(champion) || "/placeholder.svg"}
-								alt="Champion portrait of {champion}"
+								src={getChampionImageUrl(champion.id) || "/placeholder.svg"}
+								alt="Champion portrait of {champion.name}"
 								class="w-full h-full object-cover {isSelected ? 'brightness-110' : 'brightness-75'}"
-								onerror={() => handleImageError(champion)}
+								onerror={() => handleImageError(champion.id)}
 								loading="lazy"
 							/>
 						{/if}
@@ -185,7 +177,7 @@
 	<div class="min-h-[60px] flex items-center justify-center mt-6">
 		{#if highlightedChampion && !isSpinning}
 			<div class="bg-primary-500/20 border-2 border-primary-400/60 rounded-lg px-6 py-3 backdrop-blur-sm animate-fade-in">
-				<p class="text-primary-300 font-bold text-lg tracking-wider uppercase">{highlightedChampion}</p>
+				<p class="text-primary-300 font-bold text-lg tracking-wider uppercase">{highlightedChampion.name}</p>
 			</div>
 		{/if}
 	</div>

@@ -314,6 +314,41 @@ export function getAllChampionIds(): string[] {
 }
 
 /**
+ * Get all champion names from cache
+ * Returns champion display names like ["Aatrox", "Ahri", "Akali", ...]
+ * Each entry includes the champion's display name from the "name" field
+ */
+export function getAllChampionNames(): string[] {
+	if (!cache.champions) {
+		return [];
+	}
+	return Object.values(cache.champions).map((champion) => champion.name);
+}
+
+/**
+ * Interface for champion data with both ID and name
+ */
+export interface ChampionData {
+	id: string;
+	name: string;
+}
+
+/**
+ * Get all champions with their IDs and names
+ * Returns array of objects with id (for images) and name (for display)
+ * Example: [{ id: "Aatrox", name: "Aatrox" }, { id: "MonkeyKing", name: "Wukong" }, ...]
+ */
+export function getAllChampions(): ChampionData[] {
+	if (!cache.champions) {
+		return [];
+	}
+	return Object.entries(cache.champions).map(([id, champion]) => ({
+		id,
+		name: champion.name
+	}));
+}
+
+/**
  * Preload all static data including version
  * Call this on app initialization to cache all data
  */

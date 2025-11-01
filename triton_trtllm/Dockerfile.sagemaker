@@ -1,0 +1,63 @@
+# SageMaker-compatible Dockerfile for F5-TTS with Triton Inference Server + TensorRT-LLM
+# Based on NVIDIA Triton Server 24.12 with Python 3 backend support
+FROM nvcr.io/nvidia/tritonserver:24.12-py3
+
+# Install Python dependencies
+# - boto3/botocore: S3 integration for champion voice loading
+# - tensorrt-llm: TensorRT-LLM 0.16.0 for F5-TTS acceleration
+# - torchaudio: Audio processing for voice cloning
+# - jieba/pypinyin: Chinese text processing for F5-TTS
+# - vocos: Vocoder for mel-spectrogram to waveform conversion
+RUN pip install --no-cache-dir \
+    boto3 \
+    botocore \
+    tritonclient[grpc] \
+    tensorrt-llm==0.16.0 \
+    torchaudio==2.5.1 \
+    jieba \
+    pypinyin \
+    librosa \
+    vocos \
+    soundfile
+
+# Set working directory
+WORKDIR /opt/ml/model
+
+# Copy model repository structure
+# This will be populated with actual models during SageMaker deployment
+COPY model_repo_f5_tts /opt/ml/model/
+
+# Copy helper scripts
+COPY scripts /opt/ml/scripts/
+
+# Environment variables for SageMaker
+ENV SAGEMAKER_PROGRAM=serve
+ENV SAGEMAKER_SUBMIT_DIRECTORY=/opt/ml/code
+ENV SAGEMAKER_MODEL_SERVER_TIMEOUT=3600
+ENV SAGEMAKER_MODEL_SERVER_WORKERS=1
+
+# SageMaker expects /ping and /invocations endpoints
+# Triton server provides these automatically on port 8080
+ENV SAGEMAKER_BIND_TO_PORT=8080
+ENV SAGEMAKER_SAFE_PORT_RANGE=8080-8080
+
+# Health check for SageMaker
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD curl -f http://localhost:8080/v2/health/ready || exit 1
+
+# Expose Triton HTTP port (SageMaker uses 8080)
+EXPOSE 8080
+
+# Triton GRPC port (optional, for debugging)
+EXPOSE 8001
+
+# Triton metrics port (optional, for monitoring)
+EXPOSE 8002
+
+# SageMaker entrypoint
+# The actual model repository path will be /opt/ml/model after deployment
+ENTRYPOINT ["tritonserver", "--model-repository=/opt/ml/model", \
+            "--http-port=8080", \
+            "--grpc-port=8001", \
+            "--metrics-port=8002", \
+            "--log-verbose=1"]

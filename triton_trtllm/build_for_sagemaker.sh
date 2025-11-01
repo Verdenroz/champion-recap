@@ -1,0 +1,135 @@
+#!/bin/bash
+# Build F5-TTS TensorRT-LLM model for AWS SageMaker deployment
+#
+# This script:
+# 1. Downloads F5-TTS base model from HuggingFace
+# 2. Converts checkpoint to TensorRT-LLM format
+# 3. Builds TensorRT engines
+# 4. Exports Vocos vocoder to TensorRT
+# 5. Creates model.tar.gz for S3 upload
+# 6. Builds and pushes Docker image to ECR
+
+set -e  # Exit on error
+
+# Configuration
+MODEL=${1:-F5TTS_v1_Base}  # F5TTS_v1_Base | F5TTS_Base | F5TTS_v1_Small | F5TTS_Small
+AWS_REGION=${AWS_REGION:-us-east-1}
+AWS_ACCOUNT=${AWS_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}
+ECR_REPO="f5tts-triton-trtllm"
+CKPT_DIR=./ckpts
+TRTLLM_CKPT_DIR=$CKPT_DIR/$MODEL/trtllm_ckpt
+TRTLLM_ENGINE_DIR=$CKPT_DIR/$MODEL/trtllm_engine
+VOCODER_ONNX_PATH=$CKPT_DIR/vocos_vocoder.onnx
+VOCODER_TRT_ENGINE_PATH=$CKPT_DIR/vocos_vocoder.plan
+MODEL_REPO=./model_repo
+
+echo "=================================================="
+echo "F5-TTS SageMaker Build Script"
+echo "=================================================="
+echo "Model: $MODEL"
+echo "AWS Region: $AWS_REGION"
+echo "AWS Account: $AWS_ACCOUNT"
+echo "ECR Repository: $ECR_REPO"
+echo "=================================================="
+
+# Stage 0: Download F5-TTS model from HuggingFace
+echo "[Stage 0] Downloading F5-TTS model from HuggingFace..."
+if [ ! -d "$CKPT_DIR/$MODEL" ]; then
+    huggingface-cli download SWivid/F5-TTS $MODEL/model_*.* $MODEL/vocab.txt --local-dir $CKPT_DIR
+else
+    echo "Model already downloaded, skipping..."
+fi
+
+ckpt_file=$(ls $CKPT_DIR/$MODEL/model_*.* 2>/dev/null | sort -V | tail -1)
+vocab_file=$CKPT_DIR/$MODEL/vocab.txt
+
+echo "Using checkpoint: $ckpt_file"
+echo "Using vocab: $vocab_file"
+
+# Stage 1: Convert checkpoint to TensorRT-LLM
+echo "[Stage 1] Converting checkpoint to TensorRT-LLM..."
+if [ ! -d "$TRTLLM_ENGINE_DIR" ]; then
+    python3 scripts/convert_checkpoint.py \
+        --pytorch_ckpt $ckpt_file \
+        --output_dir $TRTLLM_CKPT_DIR \
+        --model_name $MODEL
+
+    # Copy patched F5TTS model to TensorRT-LLM
+    python_package_path=/usr/local/lib/python3.12/dist-packages
+    cp -r patch/* $python_package_path/tensorrt_llm/models
+
+    # Build TensorRT-LLM engine
+    trtllm-build --checkpoint_dir $TRTLLM_CKPT_DIR \
+        --max_batch_size 8 \
+        --output_dir $TRTLLM_ENGINE_DIR \
+        --remove_input_padding disable
+else
+    echo "TensorRT-LLM engine already built, skipping..."
+fi
+
+# Stage 2: Export Vocos vocoder to TensorRT
+echo "[Stage 2] Exporting Vocos vocoder to TensorRT..."
+if [ ! -f "$VOCODER_TRT_ENGINE_PATH" ]; then
+    python3 scripts/export_vocoder_to_onnx.py \
+        --vocoder vocos \
+        --output-path $VOCODER_ONNX_PATH
+
+    bash scripts/export_vocos_trt.sh $VOCODER_ONNX_PATH $VOCODER_TRT_ENGINE_PATH
+else
+    echo "Vocoder TensorRT engine already exists, skipping..."
+fi
+
+# Stage 3: Build Triton model repository
+echo "[Stage 3] Building Triton model repository..."
+rm -rf $MODEL_REPO
+cp -r ./model_repo_f5_tts $MODEL_REPO
+
+# Fill config.pbtxt template with paths
+python3 scripts/fill_template.py \
+    -i $MODEL_REPO/f5_tts/config.pbtxt \
+    vocab:$vocab_file,model:$ckpt_file,trtllm:$TRTLLM_ENGINE_DIR,vocoder:vocos
+
+# Copy vocoder TensorRT engine
+cp $VOCODER_TRT_ENGINE_PATH $MODEL_REPO/vocoder/1/vocoder.plan
+
+echo "[Stage 3] Triton model repository built successfully"
+ls -lR $MODEL_REPO
+
+# Stage 4: Create model.tar.gz for S3 upload
+echo "[Stage 4] Creating model.tar.gz for SageMaker..."
+tar -czf model.tar.gz -C $MODEL_REPO .
+echo "Created model.tar.gz ($(du -h model.tar.gz | cut -f1))"
+
+# Stage 5: Build and push Docker image to ECR
+echo "[Stage 5] Building Docker image for SageMaker..."
+
+# Create ECR repository if it doesn't exist
+aws ecr describe-repositories --repository-names $ECR_REPO --region $AWS_REGION 2>/dev/null || \
+    aws ecr create-repository --repository-name $ECR_REPO --region $AWS_REGION
+
+# Get ECR login
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS --password-stdin $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# Build Docker image
+docker build -t $ECR_REPO:latest -f Dockerfile.sagemaker .
+
+# Tag for ECR
+docker tag $ECR_REPO:latest $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+
+# Push to ECR
+docker push $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+
+echo "=================================================="
+echo "Build Complete!"
+echo "=================================================="
+echo "Model archive: model.tar.gz"
+echo "Docker image: $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest"
+echo ""
+echo "Next steps:"
+echo "1. Upload model.tar.gz to S3:"
+echo "   aws s3 cp model.tar.gz s3://champion-recap-models-$AWS_ACCOUNT/f5tts-triton-trtllm/"
+echo ""
+echo "2. Deploy CDK stack:"
+echo "   cd ../aws-cdk && cdk deploy"
+echo "=================================================="

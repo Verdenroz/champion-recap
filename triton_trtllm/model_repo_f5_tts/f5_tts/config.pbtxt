@@ -40,8 +40,8 @@ parameters [
    value: {string_value:"${vocoder}"}
   },
   {
-   key: "voice_bucket",
-   value: {string_value:"${VOICE_BUCKET}"}
+   key: "s3_voice_bucket",
+   value: {string_value:"${S3_VOICE_BUCKET}"}
   }
 ]
 
@@ -50,6 +50,7 @@ input [
     name: "champion_id"
     data_type: TYPE_STRING
     dims: [1]
+    optional: True
   },
   {
     name: "reference_wav"

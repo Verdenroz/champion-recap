@@ -1,0 +1,93 @@
+# Runtime/Triton TRT-LLM Related
+model.cache
+model_repo/
+
+# TensorRT Engines (Large Binary Files)
+*.plan
+*.engine
+*.trt
+*.onnx
+
+# Model Artifacts (Large Files - Download from HuggingFace/S3)
+model.tar.gz
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.bin
+*.msgpack
+
+# F5-TTS Model Files
+F5TTS_Base/
+F5TTS_v1_Base/
+F5TTS_Small/
+F5TTS_v1_Small/
+vocos-mel-24khz/
+
+# Hugging Face Cache
+.cache/
+huggingface_cache/
+transformers_cache/
+
+# TensorRT-LLM Build Artifacts
+*.so
+*.o
+*.a
+*.dylib
+*.dll
+*.obj
+*.lib
+*.exp
+*.pdb
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated Audio Outputs
+*.wav
+*.mp3
+*.flac
+*.ogg
+!reference.wav  # Keep reference audio for voice cloning
+
+# Benchmark Results
+benchmark_results/
+tests/benchmark*/
+*.json.log
+
+# Docker Build Context
+.dockerignore
+docker-compose.override.yml
+
+# Temporary Files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Logs
+*.log
+logs/
+
+# S3 Upload Scripts Temp
+uploads/
+.upload_cache/

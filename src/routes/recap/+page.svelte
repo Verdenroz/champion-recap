@@ -5,7 +5,9 @@
 	import VoicePlayer from '$lib/components/VoicePlayer.svelte';
 	import TypewriterText from '$lib/components/TypewriterText.svelte';
 	import ChampionStatsChart from '$lib/components/ChampionStatsChart.svelte';
+	import CoachingObservation from '$lib/components/CoachingObservation.svelte';
 	import { useChampionVoice } from '$lib/queries/voice-metadata';
+	import { useCoachingWebSocket, type CoachingWebSocketStore, type CoachingObservation as CoachingObservationType, type CoachingConnectionState } from '$lib/hooks/useCoachingWebSocket';
 	import type { AccountData, RecapData } from '$lib/types/recap';
 
 	let gameName = $state('');
@@ -20,6 +22,11 @@
 	let championNames = $state<Record<number, string>>({});
 	let totalMatches = $state(0);
 	let processedMatches = $state(0);
+
+	// Coaching state
+	let coachingEnabled = $state(false);
+	let coachingSession = $state<CoachingWebSocketStore | null>(null);
+	let showCoaching = $state(false);
 
 	// Extract params from URL
 	$effect(() => {
@@ -146,6 +153,78 @@
 		if (!loading && recapData) {
 			showTypewriter = true;
 		}
+	});
+
+	// Initialize coaching session when recap completes
+	async function initializeCoaching() {
+		if (!accountData?.puuid || !topChampion) {
+			console.error('Missing required data for coaching:', { puuid: accountData?.puuid, topChampion });
+			return;
+		}
+
+		try {
+			// Call coaching API to initialize session
+			const response = await fetch('/api/coaching', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					puuid: accountData.puuid,
+					topChampion: topChampion
+				})
+			});
+
+			if (!response.ok) {
+				throw new Error(`Failed to initialize coaching: ${response.statusText}`);
+			}
+
+			const data = await response.json();
+			console.log('[Coaching] Session initialized:', data);
+
+			// Connect to WebSocket
+			coachingSession = useCoachingWebSocket(data.wsUrl, data.sessionId);
+			showCoaching = true;
+
+			console.log('[Coaching] WebSocket connected');
+		} catch (err) {
+			console.error('[Coaching] Failed to initialize:', err);
+			error = err instanceof Error ? err.message : 'Failed to initialize coaching';
+		}
+	}
+
+	// Start coaching when user clicks the button
+	function handleStartCoaching() {
+		coachingEnabled = true;
+		initializeCoaching();
+	}
+
+	// Use $effect to manually subscribe to coaching session stores and update local state
+	let connectionState = $state<CoachingConnectionState>('disconnected');
+	let coachingError = $state<string | null>(null);
+	let currentObservation = $state('');
+	let currentMatchNumber = $state<number | null>(null);
+	let observations = $state<CoachingObservationType[]>([]);
+
+	$effect(() => {
+		if (!coachingSession) {
+			connectionState = 'disconnected';
+			coachingError = null;
+			currentObservation = '';
+			currentMatchNumber = null;
+			observations = [];
+			return;
+		}
+
+		const unsubscribers = [
+			coachingSession.connectionState.subscribe(val => connectionState = val),
+			coachingSession.error.subscribe(val => coachingError = val),
+			coachingSession.currentObservation.subscribe(val => currentObservation = val),
+			coachingSession.currentMatchNumber.subscribe(val => currentMatchNumber = val),
+			coachingSession.observations.subscribe(val => observations = val)
+		];
+
+		return () => {
+			unsubscribers.forEach(unsub => unsub());
+		};
 	});
 </script>
 
@@ -337,6 +416,90 @@
 						championName={topChampion}
 					/>
 				{/if}
+
+				<!-- Coaching Button -->
+				{#if !coachingEnabled && topChampion}
+					<div class="card bg-gradient-to-br from-blue-900/30 to-black border border-blue-700/30 card-hover shadow-xl">
+						<div class="card-body text-center">
+							<h3 class="text-2xl font-bold text-white mb-2">
+								Want personalized coaching?
+							</h3>
+							<p class="text-gray-400 mb-4">
+								Get match-by-match analysis from {topChampion}'s perspective
+							</p>
+							<button
+								onclick={handleStartCoaching}
+								class="btn btn-primary btn-lg"
+							>
+								<span class="iconify lucide--mic-2 w-5 h-5"></span>
+								Start Coaching Session
+							</button>
+						</div>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- Coaching Observations Section -->
+		{#if showCoaching && coachingSession}
+			<div class="mb-8 space-y-6">
+				<div class="card bg-black/60 backdrop-blur-xl border-gray-800/50 shadow-xl">
+					<div class="card-body">
+						<h2 class="text-3xl font-bold text-white mb-4 flex items-center gap-3">
+							<span class="iconify lucide--mic-2 w-8 h-8 text-purple-400"></span>
+							Coaching Observations
+						</h2>
+						<p class="text-gray-400 mb-4">
+							{topChampion} is analyzing your matches and providing personalized feedback
+						</p>
+
+						<!-- Connection Status -->
+						<div class="flex items-center gap-2 mb-4">
+							{#if connectionState === 'connecting'}
+								<span class="loading loading-spinner loading-sm text-yellow-500"></span>
+								<span class="text-sm text-yellow-500">Connecting...</span>
+							{:else if connectionState === 'connected'}
+								<span class="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
+								<span class="text-sm text-green-500">Connected</span>
+							{:else if connectionState === 'error'}
+								<span class="iconify lucide--alert-circle w-4 h-4 text-red-500"></span>
+								<span class="text-sm text-red-500">Connection Error</span>
+							{:else}
+								<span class="h-2 w-2 rounded-full bg-gray-500"></span>
+								<span class="text-sm text-gray-500">Disconnected</span>
+							{/if}
+						</div>
+
+						<!-- Error Message -->
+						{#if coachingError}
+							<div class="alert alert-error mb-4">
+								<span class="iconify lucide--alert-circle"></span>
+								<span>{coachingError}</span>
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<!-- Current Streaming Observation -->
+				{#if currentObservation && currentMatchNumber}
+					<CoachingObservation
+						observation={{
+							matchNumber: currentMatchNumber,
+							text: '',
+							champion: topChampion,
+							timestamp: new Date().toISOString()
+						}}
+						isStreaming={true}
+						streamingText={currentObservation}
+					/>
+				{/if}
+
+				<!-- Completed Observations -->
+				<div use:autoAnimate class="space-y-6">
+					{#each observations as observation (observation.timestamp)}
+						<CoachingObservation {observation} />
+					{/each}
+				</div>
 			</div>
 		{/if}
 

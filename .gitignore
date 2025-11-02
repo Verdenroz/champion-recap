@@ -24,3 +24,16 @@ vite.config.ts.timestamp-*
 
 # Database
 /data
+
+# Claude Code
+.claude/
+.mcp.json
+
+# Generated audio files
+/static/audio/*.mp3
+/static/audio/*.wav
+!/static/audio/.gitkeep
+
+# SvelteKit additional artifacts
+.svelte-kit/
+build/

@@ -6,10 +6,11 @@
 		audioUrl: string;
 		championName: string;
 		autoplay?: boolean;
+		compact?: boolean;
 		onEnd?: () => void;
 	}
 
-	let { audioUrl, championName, autoplay = false, onEnd }: VoicePlayerProps = $props();
+	let { audioUrl, championName, autoplay = false, compact = false, onEnd }: VoicePlayerProps = $props();
 
 	let isPlaying = $state(false);
 	let progress = $state(0);
@@ -107,16 +108,18 @@
 	});
 </script>
 
-<div class="voice-player card bg-gradient-to-br from-purple-900/30 to-black border border-purple-700/30 shadow-lg">
-	<div class="card-body p-4">
-		<!-- Champion Name -->
-		<div class="flex items-center gap-3 mb-3">
-			<span class="iconify lucide--mic-2 text-purple-400 w-5 h-5"></span>
-			<span class="text-sm font-semibold text-purple-300">{championName}</span>
-		</div>
+<div class="voice-player {compact ? '' : 'card bg-gradient-to-br from-purple-900/30 to-black border border-purple-700/30 shadow-lg'}">
+	<div class="{compact ? 'p-2' : 'card-body p-4'}">
+		{#if !compact}
+			<!-- Champion Name (full size only) -->
+			<div class="flex items-center gap-3 mb-3">
+				<span class="iconify lucide--mic-2 text-purple-400 w-5 h-5"></span>
+				<span class="text-sm font-semibold text-purple-300">{championName}</span>
+			</div>
+		{/if}
 
 		<!-- Progress Bar -->
-		<div class="mb-3">
+		<div class="{compact ? 'mb-2' : 'mb-3'}">
 			<input
 				type="range"
 				min="0"
@@ -125,25 +128,30 @@
 				oninput={(e) => seek(Number(e.currentTarget.value))}
 				class="range range-xs range-primary w-full"
 			/>
-			<div class="flex justify-between text-xs text-gray-500 mt-1">
-				<span>{formatTime(currentTime)}</span>
-				<span>{formatTime(duration)}</span>
-			</div>
+			{#if !compact}
+				<div class="flex justify-between text-xs text-gray-500 mt-1">
+					<span>{formatTime(currentTime)}</span>
+					<span>{formatTime(duration)}</span>
+				</div>
+			{/if}
 		</div>
 
 		<!-- Controls -->
-		<div class="flex items-center justify-center gap-4">
+		<div class="flex items-center {compact ? 'justify-start gap-2' : 'justify-center gap-4'}">
 			<button
 				onclick={togglePlay}
-				class="btn btn-circle btn-primary btn-sm"
+				class="btn btn-circle btn-primary {compact ? 'btn-xs' : 'btn-sm'}"
 				aria-label={isPlaying ? 'Pause' : 'Play'}
 			>
 				{#if isPlaying}
-					<span class="iconify lucide--pause w-4 h-4"></span>
+					<span class="iconify lucide--pause {compact ? 'w-3 h-3' : 'w-4 h-4'}"></span>
 				{:else}
-					<span class="iconify lucide--play w-4 h-4"></span>
+					<span class="iconify lucide--play {compact ? 'w-3 h-3' : 'w-4 h-4'}"></span>
 				{/if}
 			</button>
+			{#if compact}
+				<span class="text-xs text-gray-400">{formatTime(currentTime)} / {formatTime(duration)}</span>
+			{/if}
 		</div>
 	</div>
 </div>

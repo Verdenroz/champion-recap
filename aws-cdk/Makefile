@@ -16,6 +16,8 @@ build-lambdas:
 	@cd ../lambda/fetch-matches && npm run build
 	@cd ../lambda/process-match && npm run build
 	@cd ../lambda/aggregate-stats && npm run build
+	@echo "Building Python Lambda dependencies..."
+	@cd ../lambda/bedrock-coaching-orchestrator && pip install -r requirements.txt -t . --upgrade
 	@echo "✓ All Lambda functions built successfully"
 
 # Deploy AWS CDK stack with environment variables

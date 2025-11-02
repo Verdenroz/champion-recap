@@ -3,17 +3,46 @@ import { DynamoDBDocumentClient, PutCommand, GetCommand } from '@aws-sdk/lib-dyn
 import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { SQSClient, SendMessageBatchCommand } from '@aws-sdk/client-sqs';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { Agent as HttpsAgent } from 'https';
+import { validateEnvironment } from '../shared/validation';
+import { logger } from '../shared/logger';
 
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const s3Client = new S3Client({});
-const sqsClient = new SQSClient({});
-const lambdaClient = new LambdaClient({});
+/**
+ * Environment Variable Validation
+ * AWS Best Practice: Validate at module initialization to fail fast
+ */
+validateEnvironment([
+	'MATCH_DATA_BUCKET',
+	'PLAYER_TABLE',
+	'MATCH_PROCESSING_QUEUE_URL',
+	'RIOT_API_KEY'
+]);
 
 const MATCH_DATA_BUCKET = process.env.MATCH_DATA_BUCKET!;
 const PLAYER_TABLE = process.env.PLAYER_TABLE!;
 const MATCH_PROCESSING_QUEUE_URL = process.env.MATCH_PROCESSING_QUEUE_URL!;
 const RIOT_API_KEY = process.env.RIOT_API_KEY!;
+
+/**
+ * HTTP Handler with Keep-Alive for Connection Reuse
+ * AWS Best Practice: Reuse connections to reduce latency
+ */
+const httpHandler = new NodeHttpHandler({
+	connectionTimeout: 3000,
+	socketTimeout: 3000,
+	httpsAgent: new HttpsAgent({
+		keepAlive: true,
+		maxSockets: 50,
+		keepAliveMsecs: 1000
+	})
+});
+
+const dynamoClient = new DynamoDBClient({ requestHandler: httpHandler });
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const s3Client = new S3Client({ requestHandler: httpHandler });
+const sqsClient = new SQSClient({ requestHandler: httpHandler });
+const lambdaClient = new LambdaClient({ requestHandler: httpHandler });
 
 interface FetchMatchesEvent {
 	gameName: string;
@@ -174,7 +203,12 @@ async function queueMatchesForProcessing(matchIds: string[], puuid: string, regi
 		}));
 
 		queued += batch.length;
-		console.log(`Queued ${queued}/${matchIds.length} matches`);
+		logger.info('Queued matches for processing', {
+			queued,
+			total: matchIds.length,
+			puuid,
+			year
+		});
 	}
 }
 
@@ -216,7 +250,9 @@ async function triggerInitialAggregation(puuid: string, year: number) {
 	const aggregateFunctionName = process.env.AWS_LAMBDA_FUNCTION_NAME?.replace('fetch-matches', 'aggregate-stats');
 
 	if (!aggregateFunctionName) {
-		console.error('Could not determine aggregate function name');
+		logger.error('Could not determine aggregate function name', new Error('AWS_LAMBDA_FUNCTION_NAME not set or invalid'), {
+			currentFunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME
+		});
 		return;
 	}
 
@@ -227,14 +263,20 @@ async function triggerInitialAggregation(puuid: string, year: number) {
 	});
 
 	await lambdaClient.send(command);
-	console.log('Triggered initial aggregation for', puuid, year);
+	logger.info('Triggered initial aggregation', { puuid, year, functionName: aggregateFunctionName });
 }
 
 /**
  * Lambda handler
  */
 export async function handler(event: FetchMatchesEvent) {
-	console.log('Fetching matches for:', event);
+	logger.info('Fetching matches', {
+		gameName: event.gameName,
+		tagLine: event.tagLine,
+		platform: event.platform,
+		region: event.region,
+		year: event.year
+	});
 
 	try {
 		const {
@@ -246,10 +288,10 @@ export async function handler(event: FetchMatchesEvent) {
 		} = event;
 
 		// Step 1: Get player PUUID
-		console.log('Fetching account...');
+		logger.info('Fetching account from Riot API', { gameName, tagLine, region });
 		const account = await getAccountByRiotId(gameName, tagLine, region) as { puuid: string };
 		const puuid = account.puuid;
-		console.log('PUUID:', puuid);
+		logger.info('Account retrieved', { puuid, gameName, tagLine });
 
 		// Step 2: Check if we already have recent data
 		const existingData = await docClient.send(new GetCommand({
@@ -258,7 +300,12 @@ export async function handler(event: FetchMatchesEvent) {
 		}));
 
 		if (existingData.Item && existingData.Item.status === 'PROCESSING') {
-			console.log('Already processing for this player/year - allowing reconnection');
+			logger.info('Player already processing - allowing reconnection', {
+				puuid,
+				year,
+				totalMatches: existingData.Item.totalMatches,
+				processedMatches: existingData.Item.processedMatches
+			});
 			// Don't block - allow user to reconnect and see progress
 			// The SSE stream will pick up the current status
 			return {
@@ -277,7 +324,11 @@ export async function handler(event: FetchMatchesEvent) {
 		}
 
 		if (existingData.Item && existingData.Item.status === 'COMPLETE') {
-			console.log('Processing already complete for this player/year');
+			logger.info('Processing already complete for player', {
+				puuid,
+				year,
+				totalMatches: existingData.Item.totalMatches
+			});
 			// Return the existing complete status
 			return {
 				statusCode: 200,
@@ -293,14 +344,20 @@ export async function handler(event: FetchMatchesEvent) {
 		}
 
 		// Step 3: Get all match IDs for the year
-		console.log('Fetching match IDs...');
+		logger.info('Fetching match IDs from Riot API', { puuid, region, year });
 		const matchIds = await getAllMatchIdsForYear(puuid, region, year);
-		console.log(`Found ${matchIds.length} total matches`);
+		logger.info('Match IDs retrieved', { puuid, year, totalMatches: matchIds.length });
 
 		// Step 4: Filter out cached matches
-		console.log('Checking S3 cache...');
+		logger.info('Checking S3 cache for existing matches', { puuid, totalMatches: matchIds.length });
 		const { cached, uncached } = await filterUncachedMatches(matchIds, puuid);
-		console.log(`Cached: ${cached.length}, Need to fetch: ${uncached.length}`);
+		logger.info('Cache check complete', {
+			puuid,
+			year,
+			cached: cached.length,
+			uncached: uncached.length,
+			cacheHitRate: `${((cached.length / matchIds.length) * 100).toFixed(1)}%`
+		});
 
 		// Step 5: Update player status to PROCESSING
 		await updatePlayerStatus(
@@ -315,7 +372,11 @@ export async function handler(event: FetchMatchesEvent) {
 
 		// Step 6: Queue uncached matches for processing
 		if (uncached.length > 0) {
-			console.log('Queuing matches for processing...');
+			logger.info('Queuing uncached matches for processing', {
+				puuid,
+				year,
+				uncachedCount: uncached.length
+			});
 			await queueMatchesForProcessing(uncached, puuid, region, year);
 		}
 
@@ -337,7 +398,13 @@ export async function handler(event: FetchMatchesEvent) {
 			})
 		};
 	} catch (error) {
-		console.error('Error fetching matches:', error);
+		logger.error('Error fetching matches', error as Error, {
+			gameName: event.gameName,
+			tagLine: event.tagLine,
+			platform: event.platform,
+			region: event.region,
+			year: event.year
+		});
 		return {
 			statusCode: 500,
 			body: JSON.stringify({

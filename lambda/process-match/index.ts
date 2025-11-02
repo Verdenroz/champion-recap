@@ -2,16 +2,44 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { Agent as HttpsAgent } from 'https';
 import type { SQSEvent, SQSRecord } from 'aws-lambda';
+import { validateEnvironment } from '../shared/validation';
+import { logger } from '../shared/logger';
 
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const s3Client = new S3Client({});
-const lambdaClient = new LambdaClient({});
+/**
+ * Environment Variable Validation
+ * AWS Best Practice: Validate at module initialization to fail fast
+ */
+validateEnvironment([
+	'MATCH_DATA_BUCKET',
+	'PLAYER_TABLE',
+	'RIOT_API_KEY'
+]);
 
 const MATCH_DATA_BUCKET = process.env.MATCH_DATA_BUCKET!;
 const PLAYER_TABLE = process.env.PLAYER_TABLE!;
 const RIOT_API_KEY = process.env.RIOT_API_KEY!;
+
+/**
+ * HTTP Handler with Keep-Alive for Connection Reuse
+ * AWS Best Practice: Reuse connections to reduce latency
+ */
+const httpHandler = new NodeHttpHandler({
+	connectionTimeout: 3000,
+	socketTimeout: 3000,
+	httpsAgent: new HttpsAgent({
+		keepAlive: true,
+		maxSockets: 50,
+		keepAliveMsecs: 1000
+	})
+});
+
+const dynamoClient = new DynamoDBClient({ requestHandler: httpHandler });
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const s3Client = new S3Client({ requestHandler: httpHandler });
+const lambdaClient = new LambdaClient({ requestHandler: httpHandler });
 
 interface MatchMessage {
 	matchId: string;
@@ -39,14 +67,20 @@ async function getMatchById(matchId: string, region: string, maxRetries = 3): Pr
 			if (response.status === 429) {
 				// Rate limited
 				const retryAfter = parseInt(response.headers.get('Retry-After') || '2');
-				console.log(`Rate limited, waiting ${retryAfter}s before retry ${attempt}/${maxRetries}`);
+				logger.warn('Rate limited by Riot API', {
+					matchId,
+					region,
+					retryAfter,
+					attempt,
+					maxRetries
+				});
 				await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
 				continue;
 			}
 
 			if (response.status === 404) {
 				// Match not found, skip it
-				console.log(`Match ${matchId} not found (404)`);
+				logger.info('Match not found (404)', { matchId, region });
 				return null;
 			}
 
@@ -55,7 +89,13 @@ async function getMatchById(matchId: string, region: string, maxRetries = 3): Pr
 			if (attempt === maxRetries) {
 				throw error;
 			}
-			console.log(`Attempt ${attempt}/${maxRetries} failed, retrying...`);
+			logger.warn('Retry attempt failed', {
+				matchId,
+				region,
+				attempt,
+				maxRetries,
+				error: error instanceof Error ? error.message : String(error)
+			});
 			await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
 		}
 	}
@@ -116,7 +156,13 @@ async function shouldTriggerAggregation(puuid: string, year: number, processedMa
 	const total = playerData.totalMatches || 0;
 	const processed = playerData.processedMatches || 0;
 
-	console.log(`Progress: ${processed}/${total} matches`);
+	logger.info('Match processing progress', {
+		puuid,
+		year,
+		processed,
+		total,
+		percentComplete: `${((processed / total) * 100).toFixed(1)}%`
+	});
 
 	return true;
 }
@@ -128,7 +174,9 @@ async function triggerAggregation(puuid: string, year: number) {
 	const aggregateFunctionName = process.env.AWS_LAMBDA_FUNCTION_NAME?.replace('process-match', 'aggregate-stats');
 
 	if (!aggregateFunctionName) {
-		console.error('Could not determine aggregate function name');
+		logger.error('Could not determine aggregate function name', new Error('AWS_LAMBDA_FUNCTION_NAME not set or invalid'), {
+			currentFunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME
+		});
 		return;
 	}
 
@@ -139,7 +187,7 @@ async function triggerAggregation(puuid: string, year: number) {
 	});
 
 	await lambdaClient.send(command);
-	console.log('Triggered aggregation for', puuid, year);
+	logger.info('Triggered aggregation', { puuid, year, functionName: aggregateFunctionName });
 }
 
 /**
@@ -160,7 +208,7 @@ async function markPlayerComplete(puuid: string, year: number) {
 	});
 
 	await docClient.send(command);
-	console.log('Marked player as COMPLETE:', puuid, year);
+	logger.info('Marked player as COMPLETE', { puuid, year });
 }
 
 /**
@@ -170,7 +218,7 @@ async function processRecord(record: SQSRecord) {
 	const message: MatchMessage = JSON.parse(record.body);
 	const { matchId, puuid, region, year } = message;
 
-	console.log(`Processing match: ${matchId} for player ${puuid}`);
+	logger.info('Processing match', { matchId, puuid, region, year });
 
 	try {
 		// Fetch match data from Riot API
@@ -178,7 +226,7 @@ async function processRecord(record: SQSRecord) {
 
 		if (!matchData) {
 			// Match not found, just increment counter
-			console.log(`Skipping match ${matchId} (not found)`);
+			logger.info('Skipping match (not found)', { matchId, puuid });
 			await incrementProcessedMatches(puuid, year);
 			return;
 		}
@@ -210,9 +258,9 @@ async function processRecord(record: SQSRecord) {
 			}
 		}
 
-		console.log(`Successfully processed match ${matchId}`);
+		logger.info('Successfully processed match', { matchId, puuid, year });
 	} catch (error) {
-		console.error(`Failed to process match ${matchId}:`, error);
+		logger.error('Failed to process match', error as Error, { matchId, puuid, region, year });
 		throw error; // Let SQS retry
 	}
 }
@@ -221,7 +269,7 @@ async function processRecord(record: SQSRecord) {
  * Lambda handler for SQS events
  */
 export async function handler(event: SQSEvent) {
-	console.log(`Processing ${event.Records.length} messages`);
+	logger.info('Processing SQS batch', { messageCount: event.Records.length });
 
 	const results = await Promise.allSettled(
 		event.Records.map(record => processRecord(record))
@@ -230,10 +278,17 @@ export async function handler(event: SQSEvent) {
 	// Check for failures
 	const failures = results.filter(r => r.status === 'rejected');
 	if (failures.length > 0) {
-		console.error(`${failures.length} messages failed processing`);
+		logger.error('Batch processing failed', new Error(`Failed to process ${failures.length} messages`), {
+			totalMessages: event.Records.length,
+			failedMessages: failures.length,
+			successfulMessages: results.length - failures.length
+		});
 		// SQS will automatically retry failed messages
 		throw new Error(`Failed to process ${failures.length} messages`);
 	}
 
-	console.log('All messages processed successfully');
+	logger.info('Batch processing complete', {
+		totalMessages: event.Records.length,
+		successfulMessages: results.length
+	});
 }

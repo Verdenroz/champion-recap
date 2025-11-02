@@ -1,14 +1,45 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { Agent as HttpsAgent } from 'https';
+import { validateEnvironment } from '../shared/validation';
+import { logger } from '../shared/logger';
 
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const lambdaClient = new LambdaClient({});
+/**
+ * Environment Variable Validation
+ * AWS Best Practice: Validate at module initialization to fail fast
+ * https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
+ */
+validateEnvironment([
+	'PLAYER_TABLE',
+	'CHAMPION_STATS_TABLE',
+	'FETCH_MATCHES_FUNCTION_ARN',
+	'RIOT_API_KEY'
+]);
 
 const PLAYER_TABLE = process.env.PLAYER_TABLE!;
 const CHAMPION_STATS_TABLE = process.env.CHAMPION_STATS_TABLE!;
 const FETCH_MATCHES_FUNCTION_ARN = process.env.FETCH_MATCHES_FUNCTION_ARN!;
+
+/**
+ * HTTP Handler with Keep-Alive for Connection Reuse
+ * AWS Best Practice: Reuse connections to reduce latency
+ * https://docs.aws.amazon.com/lambda/latest/dg/nodejs-handler.html
+ */
+const httpHandler = new NodeHttpHandler({
+	connectionTimeout: 3000,
+	socketTimeout: 3000,
+	httpsAgent: new HttpsAgent({
+		keepAlive: true,
+		maxSockets: 50,
+		keepAliveMsecs: 1000
+	})
+});
+
+const dynamoClient = new DynamoDBClient({ requestHandler: httpHandler });
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const lambdaClient = new LambdaClient({ requestHandler: httpHandler });
 
 interface APIGatewayEvent {
 	httpMethod: string;
@@ -129,7 +160,11 @@ async function triggerMatchFetch(gameName: string, tagLine: string, platform: st
  * Lambda handler
  */
 export async function handler(event: APIGatewayEvent) {
-	console.log('API Request:', event);
+	logger.info('API request received', {
+		method: event.httpMethod,
+		path: event.path,
+		params: event.queryStringParameters
+	});
 
 	const corsHeaders = {
 		'Access-Control-Allow-Origin': '*',
@@ -306,7 +341,10 @@ export async function handler(event: APIGatewayEvent) {
 			body: JSON.stringify({ error: 'Route not found' })
 		};
 	} catch (error) {
-		console.error('API Error:', error);
+		logger.error('API request failed', error as Error, {
+			method: event.httpMethod,
+			path: event.path
+		});
 		return {
 			statusCode: 500,
 			headers: corsHeaders,

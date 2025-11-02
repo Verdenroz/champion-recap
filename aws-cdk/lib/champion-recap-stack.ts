@@ -4,12 +4,14 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sagemaker from 'aws-cdk-lib/aws-sagemaker';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
+import { BedrockCoachingConstruct } from './bedrock-coaching-construct';
 
 export class ChampionRecapStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -63,6 +65,25 @@ export class ChampionRecapStack extends cdk.Stack {
 			pointInTimeRecovery: true
 		});
 
+		// Coaching Sessions Table
+		const coachingSessionsTable = new dynamodb.Table(this, 'CoachingSessionsTable', {
+			tableName: 'ChampionRecap-CoachingSessions',
+			partitionKey: { name: 'session_id', type: dynamodb.AttributeType.STRING },
+			sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
+			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+			removalPolicy: cdk.RemovalPolicy.DESTROY,
+			pointInTimeRecovery: true,
+			timeToLiveAttribute: 'ttl'
+		});
+
+		// Global Secondary Index for querying by summoner
+		coachingSessionsTable.addGlobalSecondaryIndex({
+			indexName: 'SummonerIndex',
+			partitionKey: { name: 'summoner_id', type: dynamodb.AttributeType.STRING },
+			sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
+			projectionType: dynamodb.ProjectionType.ALL
+		});
+
 		// ===================================
 		// S3 Bucket for Voice Models
 		// ===================================
@@ -108,7 +129,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			queueName: 'champion-recap-match-processing.fifo',
 			fifo: true,
 			contentBasedDeduplication: true,
-			visibilityTimeout: cdk.Duration.minutes(5),
+			visibilityTimeout: cdk.Duration.minutes(3), // 1.5x Lambda timeout (2min)
 			deadLetterQueue: {
 				queue: dlq,
 				maxReceiveCount: 3
@@ -127,6 +148,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			code: lambda.Code.fromAsset('../lambda/fetch-matches/dist'),
 			timeout: cdk.Duration.minutes(15),
 			memorySize: 1024,
+			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				MATCH_DATA_BUCKET: matchDataBucket.bucketName,
 				PLAYER_TABLE: playerTable.tableName,
@@ -136,6 +158,10 @@ export class ChampionRecapStack extends cdk.Stack {
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
 
+		// NOTE: Bedrock Coaching construct will be added after WebSocket API is created
+		// This is because the construct needs the WebSocket endpoint URL
+		// Placeholder for now - will be initialized after line 678
+
 		// Lambda: Aggregate Champion Statistics
 		const aggregateStatsFunction = new lambda.Function(this, 'AggregateStatsFunction', {
 			functionName: 'champion-recap-aggregate-stats',
@@ -144,10 +170,12 @@ export class ChampionRecapStack extends cdk.Stack {
 			code: lambda.Code.fromAsset('../lambda/aggregate-stats/dist'),
 			timeout: cdk.Duration.minutes(5),
 			memorySize: 2048,
+			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				CHAMPION_STATS_TABLE: championStatsTable.tableName,
 				PLAYER_TABLE: playerTable.tableName,
 				MATCH_DATA_BUCKET: matchDataBucket.bucketName
+				// COACHING_AGENT_FUNCTION will be added after Bedrock construct is created
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
@@ -160,6 +188,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			code: lambda.Code.fromAsset('../lambda/api-handler/dist'),
 			timeout: cdk.Duration.seconds(30),
 			memorySize: 512,
+			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				PLAYER_TABLE: playerTable.tableName,
 				CHAMPION_STATS_TABLE: championStatsTable.tableName,
@@ -177,14 +206,14 @@ export class ChampionRecapStack extends cdk.Stack {
 			code: lambda.Code.fromAsset('../lambda/process-match/dist'),
 			timeout: cdk.Duration.minutes(2),
 			memorySize: 512,
+			reservedConcurrentExecutions: 10, // Limit concurrency to protect Riot API rate limits
+			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				MATCH_DATA_BUCKET: matchDataBucket.bucketName,
 				PLAYER_TABLE: playerTable.tableName,
 				RIOT_API_KEY: process.env.RIOT_API_KEY || ''
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
-			// Note: reservedConcurrentExecutions removed due to account limits
-			// Riot API rate limiting is handled by retry logic and SQS visibility timeout
 		});
 
 		// Connect process-match Lambda to SQS queue
@@ -212,6 +241,7 @@ export class ChampionRecapStack extends cdk.Stack {
 		matchDataBucket.grantRead(aggregateStatsFunction);
 		championStatsTable.grantWriteData(aggregateStatsFunction);
 		playerTable.grantReadWriteData(aggregateStatsFunction);
+		// Coaching agent invoke permission added after Bedrock construct creation (line 682)
 
 		// API Handler Function
 		playerTable.grantReadData(apiHandlerFunction);
@@ -256,11 +286,11 @@ export class ChampionRecapStack extends cdk.Stack {
 		// Single model endpoint - champion voices loaded dynamically from S3
 		// ===================================
 
-		// Create ECR repository reference for F5-TTS Triton container
+		// Create ECR repository reference for F5-TTS Triton TensorRT-LLM container
 		const f5ttsTritonRepo = ecr.Repository.fromRepositoryName(
 			this,
 			'F5TTSTritonRepo',
-			'f5tts-triton'
+			'f5tts-triton-trtllm'
 		);
 
 		// Create IAM role for SageMaker with all permissions defined upfront
@@ -313,7 +343,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			executionRoleArn: sagemakerRole.roleArn,
 			primaryContainer: {
 				image: `${this.account}.dkr.ecr.${this.region}.amazonaws.com/${f5ttsTritonRepo.repositoryName}:latest`,
-				modelDataUrl: `s3://${modelsBucket.bucketName}/f5tts-triton/model.tar.gz`, // Single base model
+				modelDataUrl: `s3://${modelsBucket.bucketName}/f5tts-triton-trtllm/model.tar.gz`, // TensorRT-LLM optimized model
 				// mode defaults to 'SingleModel' - no MME
 				environment: {
 					// Triton Single Model configuration
@@ -327,8 +357,9 @@ export class ChampionRecapStack extends cdk.Stack {
 					SAGEMAKER_TRITON_CLOUDWATCH_LOG_GROUP: tritonLogGroup.logGroupName,
 					SAGEMAKER_TRITON_METRIC_NAMESPACE: 'ChampionRecap/VoiceGeneration',
 
-					// Custom environment for F5-TTS Python backend
-					VOICE_BUCKET: voicesBucket.bucketName, // S3 bucket for champion reference audio
+					// Custom environment for F5-TTS Python backend with S3 integration
+					S3_VOICE_BUCKET: voicesBucket.bucketName, // S3 bucket for champion reference audio (used in config.pbtxt)
+					VOICE_BUCKET: voicesBucket.bucketName, // Backwards compatibility
 					MODEL_BUCKET: modelsBucket.bucketName // S3 bucket for TensorRT engine caching
 				}
 			}
@@ -469,6 +500,7 @@ exports.handler = async (event) => {
 			`),
 			timeout: cdk.Duration.minutes(2),
 			memorySize: 512,
+			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				SAGEMAKER_ENDPOINT_NAME: endpoint.endpointName!
 			},
@@ -486,6 +518,150 @@ exports.handler = async (event) => {
 		const generate = voice.addResource('generate');
 
 		generate.addMethod('POST', new apigateway.LambdaIntegration(voiceGeneratorLambda));
+
+		// ===================================
+		// Update Coaching Agent with additional environment variables and permissions
+		// ===================================
+
+		// Old coaching agent environment and permissions removed
+		// All permissions now handled by BedrockCoachingConstruct (line 669-682)
+
+		// ===================================
+		// WebSocket API for Real-time Coaching Streaming
+		// ===================================
+
+		// WebSocket Lambda for connection management
+		const wsConnectionHandler = new lambda.Function(this, 'WSConnectionHandler', {
+			functionName: 'champion-recap-ws-connection',
+			runtime: lambda.Runtime.NODEJS_20_X,
+			handler: 'index.handler',
+			code: lambda.Code.fromInline(`
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+
+const dynamoClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+const TABLE_NAME = process.env.CONNECTIONS_TABLE;
+
+exports.handler = async (event) => {
+  const connectionId = event.requestContext.connectionId;
+  const routeKey = event.requestContext.routeKey;
+
+  console.log('WebSocket event:', { connectionId, routeKey });
+
+  try {
+    if (routeKey === '$connect') {
+      // Store connection
+      await docClient.send(new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          connectionId,
+          timestamp: Date.now(),
+          ttl: Math.floor(Date.now() / 1000) + (3600 * 8) // 8 hours
+        }
+      }));
+
+      return { statusCode: 200, body: 'Connected' };
+    }
+
+    if (routeKey === '$disconnect') {
+      // Remove connection
+      await docClient.send(new DeleteCommand({
+        TableName: TABLE_NAME,
+        Key: { connectionId }
+      }));
+
+      return { statusCode: 200, body: 'Disconnected' };
+    }
+
+    if (routeKey === '$default') {
+      // Handle incoming messages
+      return { statusCode: 200, body: 'Message received' };
+    }
+
+    return { statusCode: 400, body: 'Unknown route' };
+
+  } catch (error) {
+    console.error('WebSocket error:', error);
+    return { statusCode: 500, body: 'Server error' };
+  }
+};
+			`),
+			timeout: cdk.Duration.seconds(30),
+			memorySize: 256,
+			tracing: lambda.Tracing.ACTIVE,
+			environment: {
+				CONNECTIONS_TABLE: coachingSessionsTable.tableName
+			},
+			logRetention: logs.RetentionDays.ONE_WEEK
+		});
+
+		// Grant WebSocket handler permissions
+		coachingSessionsTable.grantReadWriteData(wsConnectionHandler);
+
+		// WebSocket API Gateway
+		const wsApi = new apigatewayv2.CfnApi(this, 'CoachingWebSocketApi', {
+			name: 'champion-recap-coaching-ws',
+			protocolType: 'WEBSOCKET',
+			routeSelectionExpression: '$request.body.action'
+		});
+
+		// WebSocket Integration
+		const wsIntegration = new apigatewayv2.CfnIntegration(this, 'WSIntegration', {
+			apiId: wsApi.ref,
+			integrationType: 'AWS_PROXY',
+			integrationUri: `arn:aws:apigateway:${this.region}:lambda:path/2015-03-31/functions/${wsConnectionHandler.functionArn}/invocations`,
+			credentialsArn: wsConnectionHandler.role!.roleArn
+		});
+
+		// WebSocket Routes
+		['$connect', '$disconnect', '$default'].forEach((routeKey) => {
+			const route = new apigatewayv2.CfnRoute(this, `WSRoute${routeKey}`, {
+				apiId: wsApi.ref,
+				routeKey,
+				target: `integrations/${wsIntegration.ref}`
+			});
+			route.addDependency(wsIntegration);
+		});
+
+		// WebSocket Deployment
+		const wsDeployment = new apigatewayv2.CfnDeployment(this, 'WSDeployment', {
+			apiId: wsApi.ref
+		});
+
+		// WebSocket Stage
+		const wsStage = new apigatewayv2.CfnStage(this, 'WSStage', {
+			apiId: wsApi.ref,
+			deploymentId: wsDeployment.ref,
+			stageName: 'prod',
+			description: 'Production WebSocket stage for coaching'
+		});
+		wsStage.addDependency(wsDeployment);
+
+		// Grant WebSocket invoke permissions
+		wsConnectionHandler.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
+
+		// ===================================
+		// Bedrock Coaching Agent Infrastructure
+		// ===================================
+
+		const websocketEndpoint = `https://${wsApi.ref}.execute-api.${this.region}.amazonaws.com/${wsStage.stageName}`;
+
+		const bedrockCoaching = new BedrockCoachingConstruct(this, 'BedrockCoaching', {
+			matchDataBucket,
+			voicesBucket,
+			sessionsTable: coachingSessionsTable,
+			sagemakerEndpointName: endpoint.endpointName!,
+			websocketEndpoint
+		});
+
+		// Update aggregate-stats Lambda to invoke orchestrator
+		aggregateStatsFunction.addEnvironment(
+			'COACHING_AGENT_FUNCTION',
+			bedrockCoaching.orchestratorFunction.functionName
+		);
+		bedrockCoaching.orchestratorFunction.grantInvoke(aggregateStatsFunction);
 
 		// ===================================
 		// Outputs
@@ -529,6 +705,31 @@ exports.handler = async (event) => {
 		new cdk.CfnOutput(this, 'VoiceGeneratorLambdaArn', {
 			value: voiceGeneratorLambda.functionArn,
 			description: 'Lambda proxy function ARN for voice generation'
+		});
+
+		new cdk.CfnOutput(this, 'CoachingSessionsTableName', {
+			value: coachingSessionsTable.tableName,
+			description: 'DynamoDB table for coaching sessions'
+		});
+
+		new cdk.CfnOutput(this, 'BedrockAgentId', {
+			value: bedrockCoaching.agent.attrAgentId,
+			description: 'Bedrock Agent ID for coaching'
+		});
+
+		new cdk.CfnOutput(this, 'BedrockAgentAliasId', {
+			value: bedrockCoaching.agentAlias.attrAgentAliasId,
+			description: 'Bedrock Agent Alias ID for coaching'
+		});
+
+		new cdk.CfnOutput(this, 'CoachingOrchestratorFunctionArn', {
+			value: bedrockCoaching.orchestratorFunction.functionArn,
+			description: 'Lambda orchestrator function ARN for coaching'
+		});
+
+		new cdk.CfnOutput(this, 'WebSocketApiUrl', {
+			value: `wss://${wsApi.ref}.execute-api.${this.region}.amazonaws.com/${wsStage.stageName}`,
+			description: 'WebSocket API URL for coaching streaming'
 		});
 	}
 }

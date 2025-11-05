@@ -171,13 +171,15 @@ async function shouldTriggerAggregation(puuid: string, year: number, processedMa
  * Trigger aggregation Lambda
  */
 async function triggerAggregation(puuid: string, year: number) {
-	const aggregateFunctionName = process.env.AWS_LAMBDA_FUNCTION_NAME?.replace('process-match', 'aggregate-stats');
+	const aggregateFunctionName = process.env.AGGREGATE_STATS_FUNCTION_NAME;
 
 	if (!aggregateFunctionName) {
-		logger.error('Could not determine aggregate function name', new Error('AWS_LAMBDA_FUNCTION_NAME not set or invalid'), {
-			currentFunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME
+		const error = new Error('AGGREGATE_STATS_FUNCTION_NAME environment variable not set');
+		logger.error('Cannot trigger aggregation', error, {
+			puuid,
+			year
 		});
-		return;
+		throw error; // Fail loudly - this is a critical configuration error
 	}
 
 	const command = new InvokeCommand({
@@ -267,6 +269,8 @@ async function processRecord(record: SQSRecord) {
 
 /**
  * Lambda handler for SQS events
+ * AWS Best Practice: Use partial batch responses to avoid reprocessing successful messages
+ * https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html#services-sqs-batchfailurereporting
  */
 export async function handler(event: SQSEvent) {
 	logger.info('Processing SQS batch', { messageCount: event.Records.length });
@@ -275,20 +279,37 @@ export async function handler(event: SQSEvent) {
 		event.Records.map(record => processRecord(record))
 	);
 
-	// Check for failures
-	const failures = results.filter(r => r.status === 'rejected');
-	if (failures.length > 0) {
-		logger.error('Batch processing failed', new Error(`Failed to process ${failures.length} messages`), {
+	// Collect failed message IDs for partial batch response
+	const batchItemFailures: { itemIdentifier: string }[] = [];
+
+	results.forEach((result, index) => {
+		if (result.status === 'rejected') {
+			const messageId = event.Records[index].messageId;
+			batchItemFailures.push({ itemIdentifier: messageId });
+
+			logger.error('Message processing failed', result.reason as Error, {
+				messageId,
+				matchId: JSON.parse(event.Records[index].body).matchId,
+				index
+			});
+		}
+	});
+
+	const successCount = results.length - batchItemFailures.length;
+
+	if (batchItemFailures.length > 0) {
+		logger.warn('Partial batch failure', {
 			totalMessages: event.Records.length,
-			failedMessages: failures.length,
-			successfulMessages: results.length - failures.length
+			successfulMessages: successCount,
+			failedMessages: batchItemFailures.length
 		});
-		// SQS will automatically retry failed messages
-		throw new Error(`Failed to process ${failures.length} messages`);
+	} else {
+		logger.info('Batch processing complete', {
+			totalMessages: event.Records.length,
+			successfulMessages: successCount
+		});
 	}
 
-	logger.info('Batch processing complete', {
-		totalMessages: event.Records.length,
-		successfulMessages: results.length
-	});
+	// Return partial batch failures - only failed messages will be retried
+	return { batchItemFailures };
 }

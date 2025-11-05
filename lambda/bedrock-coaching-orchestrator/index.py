@@ -18,6 +18,7 @@ import json
 import uuid
 import boto3
 from typing import Dict, Any, List
+from logger import logger, log_with_context
 from session_manager import SessionManager, get_session_attributes
 from voice_generator import generate_voice
 from websocket_client import send_websocket_message
@@ -50,7 +51,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "connection_id": "websocket-connection-id" (optional)
     }
     """
-    print(f"Orchestrator invoked: {json.dumps(event, default=str)}")
+    log_with_context(logger, "info", "Orchestrator invoked", event=json.dumps(event, default=str))
 
     # Extract event data
     session_id = event.get('session_id') or str(uuid.uuid4())
@@ -61,9 +62,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     total_matches = len(matches)
 
-    print(f"Starting coaching session {session_id} for {summoner_id}")
-    print(f"Champion personality: {top_champion}")
-    print(f"Total matches: {total_matches}")
+    log_with_context(
+        logger,
+        "info",
+        "Starting coaching session",
+        session_id=session_id,
+        summoner_id=summoner_id,
+        champion_personality=top_champion,
+        total_matches=total_matches
+    )
 
     # Create session in DynamoDB
     session_manager = SessionManager(session_id)
@@ -95,12 +102,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 }
             )
     except Exception as e:
-        print(f"Error generating welcome message: {e}")
+        logger.error("Error generating welcome message", exc_info=True, extra={
+            "context": {"session_id": session_id, "champion": top_champion}
+        })
         # Continue anyway - not critical
 
     # Invoke Bedrock Agent with streaming matches
     try:
         invoke_bedrock_agent(session_id, matches)
+
+        log_with_context(
+            logger,
+            "info",
+            "Coaching session completed successfully",
+            session_id=session_id,
+            matches_analyzed=total_matches
+        )
 
         return {
             'statusCode': 200,
@@ -111,7 +128,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             })
         }
     except Exception as e:
-        print(f"Error invoking Bedrock Agent: {e}")
+        logger.error("Error invoking Bedrock Agent", exc_info=True, extra={
+            "context": {"session_id": session_id, "total_matches": total_matches}
+        })
         return {
             'statusCode': 500,
             'body': json.dumps({

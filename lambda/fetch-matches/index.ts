@@ -214,6 +214,8 @@ async function queueMatchesForProcessing(matchIds: string[], puuid: string, regi
 
 /**
  * Save/Update player processing status in DynamoDB
+ * AWS Best Practice: Use conditional writes to prevent race conditions
+ * https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithItems.html#WorkingWithItems.ConditionalUpdate
  */
 async function updatePlayerStatus(
 	puuid: string,
@@ -237,23 +239,49 @@ async function updatePlayerStatus(
 			processedMatches: cachedMatches, // Start with cached matches
 			lastUpdated: new Date().toISOString(),
 			ttl: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
+		},
+		// Condition: Only write if item doesn't exist OR status is not already PROCESSING
+		// This prevents race conditions when multiple users request the same player
+		ConditionExpression: 'attribute_not_exists(puuid) OR #status <> :processing',
+		ExpressionAttributeNames: {
+			'#status': 'status'
+		},
+		ExpressionAttributeValues: {
+			':processing': 'PROCESSING'
 		}
 	});
 
-	await docClient.send(command);
+	try {
+		await docClient.send(command);
+	} catch (error: any) {
+		// ConditionalCheckFailedException means the item already exists and is being processed
+		if (error.name === 'ConditionalCheckFailedException') {
+			logger.info('Player already being processed - concurrent request detected', {
+				puuid,
+				year,
+				status
+			});
+			// This is not an error - just means another request is already processing this player
+			// The caller will handle this gracefully
+			throw new Error('ALREADY_PROCESSING');
+		}
+		throw error; // Re-throw other errors
+	}
 }
 
 /**
  * Trigger initial aggregation with cached matches
  */
 async function triggerInitialAggregation(puuid: string, year: number) {
-	const aggregateFunctionName = process.env.AWS_LAMBDA_FUNCTION_NAME?.replace('fetch-matches', 'aggregate-stats');
+	const aggregateFunctionName = process.env.AGGREGATE_STATS_FUNCTION_NAME;
 
 	if (!aggregateFunctionName) {
-		logger.error('Could not determine aggregate function name', new Error('AWS_LAMBDA_FUNCTION_NAME not set or invalid'), {
-			currentFunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME
+		const error = new Error('AGGREGATE_STATS_FUNCTION_NAME environment variable not set');
+		logger.error('Cannot trigger aggregation', error, {
+			puuid,
+			year
 		});
-		return;
+		throw error; // Fail loudly - this is a critical configuration error
 	}
 
 	const command = new InvokeCommand({
@@ -360,15 +388,40 @@ export async function handler(event: FetchMatchesEvent) {
 		});
 
 		// Step 5: Update player status to PROCESSING
-		await updatePlayerStatus(
-			puuid,
-			year,
-			'PROCESSING',
-			account,
-			matchIds.length,
-			cached.length,
-			uncached.length
-		);
+		try {
+			await updatePlayerStatus(
+				puuid,
+				year,
+				'PROCESSING',
+				account,
+				matchIds.length,
+				cached.length,
+				uncached.length
+			);
+		} catch (error: any) {
+			// If already processing, return the existing session info
+			if (error.message === 'ALREADY_PROCESSING') {
+				const existingData = await docClient.send(new GetCommand({
+					TableName: PLAYER_TABLE,
+					Key: { puuid, year }
+				}));
+
+				return {
+					statusCode: 200,
+					body: JSON.stringify({
+						puuid,
+						year,
+						status: existingData.Item?.status || 'PROCESSING',
+						totalMatches: existingData.Item?.totalMatches || matchIds.length,
+						cachedMatches: existingData.Item?.cachedMatches || cached.length,
+						processedMatches: existingData.Item?.processedMatches || cached.length,
+						queuedMatches: existingData.Item?.queuedMatches || uncached.length,
+						message: 'Reconnected to existing processing session (concurrent request)'
+					})
+				};
+			}
+			throw error; // Re-throw other errors
+		}
 
 		// Step 6: Queue uncached matches for processing
 		if (uncached.length > 0) {

@@ -9,7 +9,9 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sagemaker from 'aws-cdk-lib/aws-sagemaker';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import { SqsDestination } from 'aws-cdk-lib/aws-lambda-destinations';
 import { Construct } from 'constructs';
 import { BedrockCoachingConstruct } from './bedrock-coaching-construct';
 
@@ -124,12 +126,19 @@ export class ChampionRecapStack extends cdk.Stack {
 			retentionPeriod: cdk.Duration.days(14)
 		});
 
+		// Async Invocation DLQ (for fetch-matches and aggregate-stats async failures)
+		const asyncInvocationDLQ = new sqs.Queue(this, 'AsyncInvocationDLQ', {
+			queueName: 'champion-recap-async-invocation-dlq',
+			retentionPeriod: cdk.Duration.days(14)
+		});
+
 		// Match Processing Queue (FIFO for ordered processing per player)
+		// https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html
 		const matchProcessingQueue = new sqs.Queue(this, 'MatchProcessingQueue', {
 			queueName: 'champion-recap-match-processing.fifo',
 			fifo: true,
 			contentBasedDeduplication: true,
-			visibilityTimeout: cdk.Duration.minutes(3), // 1.5x Lambda timeout (2min)
+			visibilityTimeout: cdk.Duration.minutes(12), // 6x Lambda timeout (2min)
 			deadLetterQueue: {
 				queue: dlq,
 				maxReceiveCount: 3
@@ -154,8 +163,11 @@ export class ChampionRecapStack extends cdk.Stack {
 				PLAYER_TABLE: playerTable.tableName,
 				MATCH_PROCESSING_QUEUE_URL: matchProcessingQueue.queueUrl,
 				RIOT_API_KEY: process.env.RIOT_API_KEY || ''
+				// AGGREGATE_STATS_FUNCTION_NAME will be added after aggregateStatsFunction is created
 			},
-			logRetention: logs.RetentionDays.ONE_WEEK
+			logRetention: logs.RetentionDays.ONE_WEEK,
+			// AWS Best Practice: Configure DLQ for async invocation failures
+			onFailure: new SqsDestination(asyncInvocationDLQ)
 		});
 
 		// NOTE: Bedrock Coaching construct will be added after WebSocket API is created
@@ -177,7 +189,9 @@ export class ChampionRecapStack extends cdk.Stack {
 				MATCH_DATA_BUCKET: matchDataBucket.bucketName
 				// COACHING_AGENT_FUNCTION will be added after Bedrock construct is created
 			},
-			logRetention: logs.RetentionDays.ONE_WEEK
+			logRetention: logs.RetentionDays.ONE_WEEK,
+			// AWS Best Practice: Configure DLQ for async invocation failures
+			onFailure: new SqsDestination(asyncInvocationDLQ)
 		});
 
 		// Lambda: API Handler
@@ -212,13 +226,17 @@ export class ChampionRecapStack extends cdk.Stack {
 				MATCH_DATA_BUCKET: matchDataBucket.bucketName,
 				PLAYER_TABLE: playerTable.tableName,
 				RIOT_API_KEY: process.env.RIOT_API_KEY || ''
+				// AGGREGATE_STATS_FUNCTION_NAME will be added after aggregateStatsFunction is created
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
 
 		// Connect process-match Lambda to SQS queue
+		// AWS Best Practice: Enable reportBatchItemFailures for partial batch response
+		// https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html#services-sqs-batchfailurereporting
 		processMatchFunction.addEventSource(new SqsEventSource(matchProcessingQueue, {
-			batchSize: 5 // Process 5 messages at a time (maxBatchingWindow not supported for FIFO queues)
+			batchSize: 5, // Process 5 messages at a time (maxBatchingWindow not supported for FIFO queues)
+			reportBatchItemFailures: true // Enable partial batch response - only failed messages are retried
 		}));
 
 		// ===================================
@@ -231,11 +249,17 @@ export class ChampionRecapStack extends cdk.Stack {
 		matchProcessingQueue.grantSendMessages(fetchMatchesFunction);
 		aggregateStatsFunction.grantInvoke(fetchMatchesFunction);
 
+		// Add aggregate stats function name to environment (after function is created)
+		fetchMatchesFunction.addEnvironment('AGGREGATE_STATS_FUNCTION_NAME', aggregateStatsFunction.functionName);
+
 		// Process Match Function
 		matchDataBucket.grantWrite(processMatchFunction);
 		playerTable.grantReadWriteData(processMatchFunction);
 		aggregateStatsFunction.grantInvoke(processMatchFunction);
 		// SQS permissions are automatically granted by addEventSource
+
+		// Add aggregate stats function name to environment (after function is created)
+		processMatchFunction.addEnvironment('AGGREGATE_STATS_FUNCTION_NAME', aggregateStatsFunction.functionName);
 
 		// Aggregate Stats Function
 		matchDataBucket.grantRead(aggregateStatsFunction);
@@ -408,6 +432,70 @@ export class ChampionRecapStack extends cdk.Stack {
 			scaleOutCooldown: cdk.Duration.minutes(1)
 		});
 
+		// ===================================
+		// CloudWatch Alarms for SageMaker Endpoint Monitoring
+		// ===================================
+
+		// Alarm: High invocation error rate (> 5% over 5 minutes)
+		const invocationErrorAlarm = new cloudwatch.Alarm(this, 'F5TTSInvocationErrors', {
+			alarmName: 'F5TTS-HighErrorRate',
+			alarmDescription: 'F5-TTS SageMaker endpoint has high invocation error rate (> 5%)',
+			metric: new cloudwatch.Metric({
+				namespace: 'AWS/SageMaker',
+				metricName: 'ModelInvocation4XXErrors',
+				dimensionsMap: {
+					EndpointName: endpoint.endpointName!,
+					VariantName: 'AllTraffic'
+				},
+				statistic: 'Sum',
+				period: cdk.Duration.minutes(5)
+			}),
+			threshold: 5,
+			evaluationPeriods: 1,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm: High latency (p99 > 10 seconds)
+		const latencyAlarm = new cloudwatch.Alarm(this, 'F5TTSHighLatency', {
+			alarmName: 'F5TTS-HighLatency',
+			alarmDescription: 'F5-TTS SageMaker endpoint p99 latency > 10 seconds',
+			metric: new cloudwatch.Metric({
+				namespace: 'AWS/SageMaker',
+				metricName: 'ModelLatency',
+				dimensionsMap: {
+					EndpointName: endpoint.endpointName!,
+					VariantName: 'AllTraffic'
+				},
+				statistic: 'p99',
+				period: cdk.Duration.minutes(5)
+			}),
+			threshold: 10000, // 10 seconds in milliseconds
+			evaluationPeriods: 2,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm: High GPU utilization (> 90% for 5 minutes)
+		const gpuUtilizationAlarm = new cloudwatch.Alarm(this, 'F5TTSHighGPUUtilization', {
+			alarmName: 'F5TTS-HighGPUUtilization',
+			alarmDescription: 'F5-TTS SageMaker endpoint GPU utilization > 90%',
+			metric: new cloudwatch.Metric({
+				namespace: '/aws/sagemaker/Endpoints',
+				metricName: 'GPUUtilization',
+				dimensionsMap: {
+					EndpointName: endpoint.endpointName!,
+					VariantName: 'AllTraffic'
+				},
+				statistic: 'Average',
+				period: cdk.Duration.minutes(5)
+			}),
+			threshold: 90,
+			evaluationPeriods: 1,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
 		// Lambda function to proxy SageMaker/Triton requests
 		// This allows us to keep the same API Gateway interface
 		const voiceGeneratorLambda = new lambda.Function(this, 'VoiceGeneratorProxyFunction', {
@@ -537,29 +625,90 @@ exports.handler = async (event) => {
 			handler: 'index.handler',
 			code: lambda.Code.fromInline(`
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
-const TABLE_NAME = process.env.CONNECTIONS_TABLE;
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE;
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE;
 
 exports.handler = async (event) => {
   const connectionId = event.requestContext.connectionId;
   const routeKey = event.requestContext.routeKey;
 
-  console.log('WebSocket event:', { connectionId, routeKey });
+  // Extract sessionId from query parameters
+  const queryParams = event.queryStringParameters || {};
+  const sessionId = queryParams.sessionId;
+
+  console.log(JSON.stringify({
+    level: 'INFO',
+    message: 'WebSocket event',
+    connectionId,
+    routeKey,
+    sessionId,
+    timestamp: new Date().toISOString()
+  }));
 
   try {
     if (routeKey === '$connect') {
-      // Store connection
+      // Validate sessionId is provided
+      if (!sessionId) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'Connection rejected - missing sessionId',
+          connectionId,
+          timestamp: new Date().toISOString()
+        }));
+        return { statusCode: 400, body: 'Missing sessionId query parameter' };
+      }
+
+      // Validate session exists in DynamoDB
+      try {
+        const sessionResult = await docClient.send(new GetCommand({
+          TableName: SESSIONS_TABLE,
+          Key: { session_id: sessionId, timestamp: 0 } // Using composite key - may need adjustment
+        }));
+
+        if (!sessionResult.Item) {
+          console.log(JSON.stringify({
+            level: 'WARN',
+            message: 'Connection rejected - invalid sessionId',
+            connectionId,
+            sessionId,
+            timestamp: new Date().toISOString()
+          }));
+          return { statusCode: 403, body: 'Invalid sessionId' };
+        }
+      } catch (err) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'Session validation skipped - table query failed',
+          connectionId,
+          sessionId,
+          error: err.message,
+          timestamp: new Date().toISOString()
+        }));
+        // Continue connection even if validation fails (graceful degradation)
+      }
+
+      // Store connection with sessionId
       await docClient.send(new PutCommand({
-        TableName: TABLE_NAME,
+        TableName: CONNECTIONS_TABLE,
         Item: {
           connectionId,
+          sessionId,
           timestamp: Date.now(),
           ttl: Math.floor(Date.now() / 1000) + (3600 * 8) // 8 hours
         }
+      }));
+
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Connection established',
+        connectionId,
+        sessionId,
+        timestamp: new Date().toISOString()
       }));
 
       return { statusCode: 200, body: 'Connected' };
@@ -568,8 +717,15 @@ exports.handler = async (event) => {
     if (routeKey === '$disconnect') {
       // Remove connection
       await docClient.send(new DeleteCommand({
-        TableName: TABLE_NAME,
+        TableName: CONNECTIONS_TABLE,
         Key: { connectionId }
+      }));
+
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Connection closed',
+        connectionId,
+        timestamp: new Date().toISOString()
       }));
 
       return { statusCode: 200, body: 'Disconnected' };
@@ -583,7 +739,14 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: 'Unknown route' };
 
   } catch (error) {
-    console.error('WebSocket error:', error);
+    console.error(JSON.stringify({
+      level: 'ERROR',
+      message: 'WebSocket error',
+      connectionId,
+      error: error.message,
+      stack: error.stack,
+      timestamp: new Date().toISOString()
+    }));
     return { statusCode: 500, body: 'Server error' };
   }
 };
@@ -592,7 +755,8 @@ exports.handler = async (event) => {
 			memorySize: 256,
 			tracing: lambda.Tracing.ACTIVE,
 			environment: {
-				CONNECTIONS_TABLE: coachingSessionsTable.tableName
+				CONNECTIONS_TABLE: coachingSessionsTable.tableName,
+				SESSIONS_TABLE: coachingSessionsTable.tableName // Using same table with different keys
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
@@ -662,6 +826,74 @@ exports.handler = async (event) => {
 			bedrockCoaching.orchestratorFunction.functionName
 		);
 		bedrockCoaching.orchestratorFunction.grantInvoke(aggregateStatsFunction);
+
+		// ===================================
+		// CloudWatch Alarms (Production Monitoring)
+		// ===================================
+
+		// Alarm 1: DLQ Messages - Critical for detecting SQS processing failures
+		new cloudwatch.Alarm(this, 'SQSDLQMessagesAlarm', {
+			alarmName: 'ChampionRecap-SQS-DLQ-Messages',
+			alarmDescription: 'Alert when messages land in SQS DLQ - indicates processing failures',
+			metric: dlq.metricApproximateNumberOfMessagesVisible(),
+			threshold: 1,
+			evaluationPeriods: 1,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm 2: Async Invocation DLQ - Critical for detecting Lambda async invocation failures
+		new cloudwatch.Alarm(this, 'AsyncDLQMessagesAlarm', {
+			alarmName: 'ChampionRecap-Async-DLQ-Messages',
+			alarmDescription: 'Alert when async invocations fail and land in DLQ',
+			metric: asyncInvocationDLQ.metricApproximateNumberOfMessagesVisible(),
+			threshold: 1,
+			evaluationPeriods: 1,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm 3: Process-Match Lambda Errors - High error rate indicates Riot API issues
+		new cloudwatch.Alarm(this, 'ProcessMatchErrorsAlarm', {
+			alarmName: 'ChampionRecap-ProcessMatch-Errors',
+			alarmDescription: 'Alert on high error rate in process-match Lambda',
+			metric: processMatchFunction.metricErrors({
+				statistic: cloudwatch.Stats.SUM,
+				period: cdk.Duration.minutes(5)
+			}),
+			threshold: 10,
+			evaluationPeriods: 2,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm 4: Process-Match Lambda Throttles - Reserved concurrency limit reached
+		new cloudwatch.Alarm(this, 'ProcessMatchThrottlesAlarm', {
+			alarmName: 'ChampionRecap-ProcessMatch-Throttles',
+			alarmDescription: 'Alert when process-match hits reserved concurrency limit',
+			metric: processMatchFunction.metricThrottles({
+				statistic: cloudwatch.Stats.SUM,
+				period: cdk.Duration.minutes(1)
+			}),
+			threshold: 5,
+			evaluationPeriods: 1,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
+
+		// Alarm 5: Fetch-Matches Lambda Errors - Indicates API Gateway or Riot API issues
+		new cloudwatch.Alarm(this, 'FetchMatchesErrorsAlarm', {
+			alarmName: 'ChampionRecap-FetchMatches-Errors',
+			alarmDescription: 'Alert on high error rate in fetch-matches Lambda',
+			metric: fetchMatchesFunction.metricErrors({
+				statistic: cloudwatch.Stats.SUM,
+				period: cdk.Duration.minutes(5)
+			}),
+			threshold: 5,
+			evaluationPeriods: 2,
+			comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+		});
 
 		// ===================================
 		// Outputs

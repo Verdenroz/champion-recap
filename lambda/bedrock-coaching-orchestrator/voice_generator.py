@@ -2,7 +2,7 @@
 SageMaker voice generator with S3 presigned URLs.
 
 Handles:
-- Invoking SageMaker F5-TTS Triton endpoint
+- Invoking SageMaker F5-TTS Triton endpoint with retry logic
 - Converting Triton float32 waveform to WAV format
 - Saving generated audio to S3
 - Generating presigned URLs for frontend access
@@ -14,9 +14,22 @@ import boto3
 import hashlib
 import numpy as np
 import soundfile as sf
+import time
+import random
 from typing import Dict, Any
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
-sagemaker_runtime = boto3.client('sagemaker-runtime')
+# Configure boto3 client with automatic retries
+sagemaker_runtime = boto3.client(
+    'sagemaker-runtime',
+    config=Config(
+        retries={
+            'max_attempts': 3,
+            'mode': 'adaptive'
+        }
+    )
+)
 s3_client = boto3.client('s3')
 
 SAGEMAKER_ENDPOINT = os.environ['SAGEMAKER_ENDPOINT']
@@ -65,18 +78,19 @@ def generate_voice(
         pass
 
     # Invoke SageMaker Triton endpoint
+    # Note: config.pbtxt uses TYPE_STRING, but client API uses BYTES (official Triton mapping)
     payload = {
         "inputs": [
             {
                 "name": "champion_id",
                 "shape": [1],
-                "datatype": "TYPE_STRING",
+                "datatype": "BYTES",
                 "data": [champion_id]
             },
             {
                 "name": "target_text",
                 "shape": [1],
-                "datatype": "TYPE_STRING",
+                "datatype": "BYTES",
                 "data": [target_text]
             }
         ]
@@ -84,11 +98,34 @@ def generate_voice(
 
     print(f"Invoking SageMaker Triton endpoint for {champion_id}: {target_text[:50]}...")
 
-    response = sagemaker_runtime.invoke_endpoint(
-        EndpointName=SAGEMAKER_ENDPOINT,
-        ContentType='application/json',
-        Body=json.dumps(payload)
-    )
+    # Invoke with exponential backoff for throttling/cold starts
+    max_retries = 3
+    response = None
+
+    for attempt in range(max_retries):
+        try:
+            response = sagemaker_runtime.invoke_endpoint(
+                EndpointName=SAGEMAKER_ENDPOINT,
+                ContentType='application/json',
+                Body=json.dumps(payload)
+            )
+            break  # Success - exit retry loop
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+
+            # Retry on throttling or model loading errors
+            if error_code in ['ThrottlingException', 'ModelError', 'ServiceUnavailable'] and attempt < max_retries - 1:
+                wait_time = (2 ** attempt) + (random.randint(0, 1000) / 1000)
+                print(f"Attempt {attempt + 1} failed ({error_code}), retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                # Non-retryable error or max retries exceeded
+                print(f"SageMaker invocation failed after {attempt + 1} attempts: {error_code}")
+                raise
+
+    if response is None:
+        raise RuntimeError("Failed to invoke SageMaker endpoint after all retries")
 
     # Parse Triton response
     result = json.loads(response['Body'].read().decode())

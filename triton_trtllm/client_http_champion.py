@@ -67,18 +67,20 @@ def prepare_request(champion_id: str, target_text: str):
 
     The champion voice (reference.wav + reference.txt) will be loaded
     automatically from S3 by the Triton model.
+
+    Note: config.pbtxt specifies dims: [1], so shape must be [1] (1D array)
     """
     data = {
         "inputs": [
             {
                 "name": "champion_id",
-                "shape": [1, 1],
+                "shape": [1],
                 "datatype": "BYTES",
                 "data": [champion_id]
             },
             {
                 "name": "target_text",
-                "shape": [1, 1],
+                "shape": [1],
                 "datatype": "BYTES",
                 "data": [target_text]
             }

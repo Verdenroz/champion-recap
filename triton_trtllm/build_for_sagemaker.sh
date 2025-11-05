@@ -23,6 +23,20 @@ VOCODER_ONNX_PATH=$CKPT_DIR/vocos_vocoder.onnx
 VOCODER_TRT_ENGINE_PATH=$CKPT_DIR/vocos_vocoder.plan
 MODEL_REPO=./model_repo
 
+# Validate required environment variables
+if [ -z "$AWS_ACCOUNT" ]; then
+    echo "ERROR: AWS_ACCOUNT not set. Run: export AWS_ACCOUNT=\$(aws sts get-caller-identity --query Account --output text)"
+    exit 1
+fi
+
+if [ -z "$AWS_REGION" ]; then
+    echo "ERROR: AWS_REGION not set. Run: export AWS_REGION=us-east-1"
+    exit 1
+fi
+
+# Set default for S3 voice bucket (can be overridden)
+S3_VOICE_BUCKET=${S3_VOICE_BUCKET:-champion-recap-voices-$AWS_ACCOUNT}
+
 echo "=================================================="
 echo "F5-TTS SageMaker Build Script"
 echo "=================================================="
@@ -30,6 +44,7 @@ echo "Model: $MODEL"
 echo "AWS Region: $AWS_REGION"
 echo "AWS Account: $AWS_ACCOUNT"
 echo "ECR Repository: $ECR_REPO"
+echo "S3 Voice Bucket: $S3_VOICE_BUCKET"
 echo "=================================================="
 
 # Stage 0: Download F5-TTS model from HuggingFace
@@ -87,7 +102,7 @@ cp -r ./model_repo_f5_tts $MODEL_REPO
 # Fill config.pbtxt template with paths
 python3 scripts/fill_template.py \
     -i $MODEL_REPO/f5_tts/config.pbtxt \
-    vocab:$vocab_file,model:$ckpt_file,trtllm:$TRTLLM_ENGINE_DIR,vocoder:vocos
+    vocab:$vocab_file,model:$ckpt_file,trtllm:$TRTLLM_ENGINE_DIR,vocoder:vocos,S3_VOICE_BUCKET:$S3_VOICE_BUCKET
 
 # Copy vocoder TensorRT engine
 cp $VOCODER_TRT_ENGINE_PATH $MODEL_REPO/vocoder/1/vocoder.plan

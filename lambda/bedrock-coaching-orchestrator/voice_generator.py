@@ -2,18 +2,16 @@
 SageMaker voice generator with S3 presigned URLs.
 
 Handles:
-- Invoking SageMaker F5-TTS Triton endpoint with retry logic
-- Converting Triton float32 waveform to WAV format
+- Invoking SageMaker F5-TTS PyTorch endpoint with retry logic
+- Handling base64-encoded WAV audio from PyTorch inference
 - Saving generated audio to S3
 - Generating presigned URLs for frontend access
 """
 import os
 import json
-import io
+import base64
 import boto3
 import hashlib
-import numpy as np
-import soundfile as sf
 import time
 import random
 from typing import Dict, Any
@@ -77,26 +75,16 @@ def generate_voice(
         # Cache miss - generate new audio
         pass
 
-    # Invoke SageMaker Triton endpoint
-    # Note: config.pbtxt uses TYPE_STRING, but client API uses BYTES (official Triton mapping)
+    # Invoke SageMaker PyTorch endpoint
+    # PyTorch endpoint expects simple JSON format (matches inference.py input_fn)
     payload = {
-        "inputs": [
-            {
-                "name": "champion_id",
-                "shape": [1],
-                "datatype": "BYTES",
-                "data": [champion_id]
-            },
-            {
-                "name": "target_text",
-                "shape": [1],
-                "datatype": "BYTES",
-                "data": [target_text]
-            }
-        ]
+        "champion_id": champion_id,
+        "text": target_text,
+        "voice_bucket": VOICE_BUCKET
+        # duration is optional - PyTorch endpoint auto-calculates if not provided
     }
 
-    print(f"Invoking SageMaker Triton endpoint for {champion_id}: {target_text[:50]}...")
+    print(f"Invoking SageMaker PyTorch endpoint for {champion_id}: {target_text[:50]}...")
 
     # Invoke with exponential backoff for throttling/cold starts
     max_retries = 3
@@ -107,6 +95,7 @@ def generate_voice(
             response = sagemaker_runtime.invoke_endpoint(
                 EndpointName=SAGEMAKER_ENDPOINT,
                 ContentType='application/json',
+                Accept='application/json',  # Request JSON response with base64 audio
                 Body=json.dumps(payload)
             )
             break  # Success - exit retry loop
@@ -127,26 +116,22 @@ def generate_voice(
     if response is None:
         raise RuntimeError("Failed to invoke SageMaker endpoint after all retries")
 
-    # Parse Triton response
+    # Parse PyTorch response
+    # PyTorch endpoint returns: { audio: base64, sample_rate: 24000, duration: X, format: "wav" }
     result = json.loads(response['Body'].read().decode())
 
-    # Extract float32 waveform from Triton response
-    if 'outputs' not in result or len(result['outputs']) == 0:
-        raise ValueError(f"No outputs in Triton response: {result}")
+    # Extract base64-encoded WAV audio
+    if 'audio' not in result:
+        raise ValueError(f"No 'audio' field in PyTorch response: {result}")
 
-    output = result['outputs'][0]
-    if output['name'] != 'waveform':
-        raise ValueError(f"Expected 'waveform' output, got: {output['name']}")
+    audio_b64 = result['audio']
+    sample_rate = result.get('sample_rate', 24000)
+    duration = result.get('duration', 0)
 
-    # Convert float32 array to numpy array
-    waveform = np.array(output['data'], dtype=np.float32)
+    print(f"Generated audio: {duration:.2f} seconds at {sample_rate}Hz")
 
-    print(f"Generated waveform: {len(waveform)} samples ({len(waveform)/24000:.2f} seconds)")
-
-    # Convert waveform to WAV bytes
-    wav_buffer = io.BytesIO()
-    sf.write(wav_buffer, waveform, 24000, format='WAV', subtype='PCM_16')
-    audio_bytes = wav_buffer.getvalue()
+    # Decode base64 to WAV bytes
+    audio_bytes = base64.b64decode(audio_b64)
 
     s3_client.put_object(
         Bucket=VOICE_BUCKET,

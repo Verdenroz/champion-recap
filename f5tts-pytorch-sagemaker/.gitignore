@@ -1,0 +1,57 @@
+# Model files (large, should be downloaded via deploy.sh)
+models/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+# Build artifacts
+model.tar.gz
+package/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+temp/
+tmp/
+
+# Audio files (test outputs)
+*.wav
+*.mp3
+*.ogg
+
+# AWS credentials (should never be committed)
+.aws/
+credentials
+config
+
+# Environment variables
+.env
+.env.local

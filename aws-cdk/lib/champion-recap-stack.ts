@@ -6,7 +6,6 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sagemaker from 'aws-cdk-lib/aws-sagemaker';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
@@ -306,21 +305,14 @@ export class ChampionRecapStack extends cdk.Stack {
 		status.addMethod('GET', apiIntegration); // GET /player/status?puuid=X&year=2025
 
 		// ===================================
-		// SageMaker Endpoint: F5-TTS Voice Generator with Triton
-		// Single model endpoint - champion voices loaded dynamically from S3
+		// SageMaker Endpoint: F5-TTS Voice Generator with PyTorch
+		// Simple PyTorch-based deployment - champion voices loaded dynamically from S3
 		// ===================================
-
-		// Create ECR repository reference for F5-TTS Triton TensorRT-LLM container
-		const f5ttsTritonRepo = ecr.Repository.fromRepositoryName(
-			this,
-			'F5TTSTritonRepo',
-			'f5tts-triton-trtllm'
-		);
 
 		// Create IAM role for SageMaker with all permissions defined upfront
 		const sagemakerRole = new iam.Role(this, 'SageMakerVoiceGeneratorRole', {
 			assumedBy: new iam.ServicePrincipal('sagemaker.amazonaws.com'),
-			description: 'IAM role for F5-TTS SageMaker Endpoint with Triton',
+			description: 'IAM role for F5-TTS SageMaker Endpoint with PyTorch',
 			managedPolicies: [
 				iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSageMakerFullAccess')
 			],
@@ -351,40 +343,21 @@ export class ChampionRecapStack extends cdk.Stack {
 		// Grant additional permissions
 		championStatsTable.grantReadData(sagemakerRole); // Read player stats (optional)
 
-		// CloudWatch Log Group for Triton metrics
-		const tritonLogGroup = new logs.LogGroup(this, 'TritonMetricsLogGroup', {
-			logGroupName: '/aws/sagemaker/Endpoints/f5tts-voice-generator',
-			retention: logs.RetentionDays.ONE_WEEK,
-			removalPolicy: cdk.RemovalPolicy.DESTROY
-		});
-
-		// Grant CloudWatch Logs permissions to SageMaker role
-		tritonLogGroup.grantWrite(sagemakerRole);
-
-		// SageMaker Model (Triton Single Model with F5-TTS)
+		// SageMaker Model (PyTorch with F5-TTS)
 		const sagemakerModel = new sagemaker.CfnModel(this, 'F5TTSVoiceGeneratorModel', {
 			modelName: 'champion-recap-f5tts-voice-generator',
 			executionRoleArn: sagemakerRole.roleArn,
 			primaryContainer: {
-				image: `${this.account}.dkr.ecr.${this.region}.amazonaws.com/${f5ttsTritonRepo.repositoryName}:latest`,
-				modelDataUrl: `s3://${modelsBucket.bucketName}/f5tts-triton-trtllm/model.tar.gz`, // TensorRT-LLM optimized model
-				// mode defaults to 'SingleModel' - no MME
+				// AWS PyTorch Deep Learning Container for GPU inference
+				image: `763104351884.dkr.ecr.${this.region}.amazonaws.com/pytorch-inference:2.1.0-gpu-py310`,
+				modelDataUrl: `s3://${modelsBucket.bucketName}/f5tts-pytorch/model.tar.gz`, // PyTorch model artifacts
 				environment: {
-					// Triton Single Model configuration
-					SAGEMAKER_TRITON_DEFAULT_MODEL_NAME: 'f5_tts', // Match config.pbtxt model name
-					SAGEMAKER_TRITON_LOG_VERBOSE: '1',
-					SAGEMAKER_TRITON_BUFFER_MANAGER_THREAD_COUNT: '2',
+					// SageMaker PyTorch configuration
+					SAGEMAKER_PROGRAM: 'inference.py', // Entry point script
+					SAGEMAKER_REGION: this.region,
 
-					// CloudWatch metrics publishing
-					SAGEMAKER_TRITON_ALLOW_METRICS: 'true',
-					SAGEMAKER_TRITON_PUBLISH_METRICS_TO_CLOUDWATCH: 'true',
-					SAGEMAKER_TRITON_CLOUDWATCH_LOG_GROUP: tritonLogGroup.logGroupName,
-					SAGEMAKER_TRITON_METRIC_NAMESPACE: 'ChampionRecap/VoiceGeneration',
-
-					// Custom environment for F5-TTS Python backend with S3 integration
-					S3_VOICE_BUCKET: voicesBucket.bucketName, // S3 bucket for champion reference audio (used in config.pbtxt)
-					VOICE_BUCKET: voicesBucket.bucketName, // Backwards compatibility
-					MODEL_BUCKET: modelsBucket.bucketName // S3 bucket for TensorRT engine caching
+					// S3 bucket for champion reference audio
+					VOICE_BUCKET: voicesBucket.bucketName
 				}
 			}
 		});
@@ -414,13 +387,13 @@ export class ChampionRecapStack extends cdk.Stack {
 
 		endpoint.addDependency(endpointConfig);
 
-		// Auto-scaling configuration (1-4 instances)
+		// Auto-scaling configuration (1-2 instances)
 		const autoScalingTarget = new cdk.aws_applicationautoscaling.ScalableTarget(this, 'F5TTSScalableTarget', {
 			serviceNamespace: cdk.aws_applicationautoscaling.ServiceNamespace.SAGEMAKER,
 			scalableDimension: 'sagemaker:variant:DesiredInstanceCount',
 			resourceId: `endpoint/${endpoint.endpointName}/variant/AllTraffic`,
 			minCapacity: 1,
-			maxCapacity: 4
+			maxCapacity: 2
 		});
 		autoScalingTarget.node.addDependency(endpoint);
 
@@ -496,7 +469,7 @@ export class ChampionRecapStack extends cdk.Stack {
 			treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
 		});
 
-		// Lambda function to proxy SageMaker/Triton requests
+		// Lambda function to proxy SageMaker/PyTorch requests
 		// This allows us to keep the same API Gateway interface
 		const voiceGeneratorLambda = new lambda.Function(this, 'VoiceGeneratorProxyFunction', {
 			functionName: 'champion-recap-voice-generator-proxy',
@@ -511,7 +484,7 @@ const ENDPOINT_NAME = process.env.SAGEMAKER_ENDPOINT_NAME;
 exports.handler = async (event) => {
   try {
     const body = JSON.parse(event.body);
-    const { championId, text, language = 'en' } = body;
+    const { championId, text, duration } = body;
 
     if (!championId || !text) {
       return {
@@ -521,60 +494,40 @@ exports.handler = async (event) => {
       };
     }
 
-    // Prepare Triton inference request format
-    const tritonPayload = {
-      inputs: [
-        {
-          name: 'champion_id',
-          shape: [1],
-          datatype: 'BYTES',
-          data: [championId.toLowerCase()]
-        },
-        {
-          name: 'target_text',
-          shape: [1],
-          datatype: 'BYTES',
-          data: [text]
-        }
-      ]
+    // Prepare PyTorch inference request format (matches inference.py input_fn)
+    const pytorchPayload = {
+      champion_id: championId.toLowerCase(),
+      text: text,
+      voice_bucket: process.env.VOICE_BUCKET,
+      duration: duration // Optional, auto-calculated if not provided
     };
 
-    // Invoke SageMaker endpoint (single model - Triton loads champion audio from S3)
+    // Invoke SageMaker endpoint (PyTorch inference)
     const command = new InvokeEndpointCommand({
       EndpointName: ENDPOINT_NAME,
-      ContentType: 'application/json', // JSON payload format
-      Accept: 'application/json', // Request JSON response
-      Body: JSON.stringify(tritonPayload)
+      ContentType: 'application/json',
+      Accept: 'application/json', // Request JSON response with base64 audio
+      Body: JSON.stringify(pytorchPayload)
     });
 
     const response = await client.send(command);
-    const tritonResult = JSON.parse(new TextDecoder().decode(response.Body));
+    const result = JSON.parse(new TextDecoder().decode(response.Body));
 
-    // Extract waveform from Triton output (only output defined in config.pbtxt)
-    const waveformOutput = tritonResult.outputs?.find(o => o.name === 'waveform');
-    if (!waveformOutput || !waveformOutput.data) {
-      throw new Error('Invalid Triton response: missing waveform output');
-    }
-
-    const audioData = waveformOutput.data;
-    const sampleRate = 24000; // Hardcoded to match model.py target_audio_sample_rate
-
-    // Convert Float32 audio to WAV format (simplified - consider using wav-encoder package)
-    const audioBase64 = Buffer.from(new Float32Array(audioData).buffer).toString('base64');
-
+    // PyTorch endpoint returns: { audio: base64, sample_rate: 24000, duration: X, format: "wav" }
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        audio_data: audioBase64,
-        sample_rate: sampleRate,
-        format: 'raw_f32', // Client needs to convert to WAV
+        audio_data: result.audio, // Base64-encoded WAV
+        sample_rate: result.sample_rate,
+        duration: result.duration,
+        format: result.format,
         champion_id: championId
       })
     };
 
   } catch (error) {
-    console.error('SageMaker/Triton invocation error:', error);
+    console.error('SageMaker PyTorch invocation error:', error);
     return {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -590,7 +543,8 @@ exports.handler = async (event) => {
 			memorySize: 512,
 			tracing: lambda.Tracing.ACTIVE,
 			environment: {
-				SAGEMAKER_ENDPOINT_NAME: endpoint.endpointName!
+				SAGEMAKER_ENDPOINT_NAME: endpoint.endpointName!,
+				VOICE_BUCKET: voicesBucket.bucketName
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});

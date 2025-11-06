@@ -1,0 +1,17 @@
+# F5-TTS PyTorch SageMaker Requirements
+# These packages are installed in addition to the base PyTorch DLC
+
+# F5-TTS core library (includes torch, torchaudio dependencies)
+f5-tts>=0.1.0
+
+# AWS SDK for S3 voice reference downloads
+boto3>=1.28.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Additional F5-TTS dependencies
+jieba>=0.42.1
+pypinyin>=0.49.0
+vocos>=0.1.0

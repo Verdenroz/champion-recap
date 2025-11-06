@@ -1,13 +1,28 @@
 #!/bin/bash
 # Build F5-TTS TensorRT-LLM model for AWS SageMaker deployment
 #
+# IMPORTANT: This script MUST be run on the same GPU architecture as your SageMaker endpoint!
+#
+# Target GPU: NVIDIA T4 (SageMaker ml.g4dn.xlarge instance)
+# CUDA Compute Capability: 7.5
+#
+# WARNING: TensorRT engines are GPU-specific and NOT portable across architectures.
+# Building on a different GPU (RTX 30xx, A100, etc.) will cause failures on SageMaker.
+#
+# Recommended Build Environment:
+# - EC2 g4dn.xlarge instance (NVIDIA T4 GPU, same as SageMaker)
+# - Ubuntu 22.04 with NVIDIA CUDA 12.x drivers
+# - Docker with NVIDIA Container Toolkit
+#
 # This script:
 # 1. Downloads F5-TTS base model from HuggingFace
 # 2. Converts checkpoint to TensorRT-LLM format
-# 3. Builds TensorRT engines
-# 4. Exports Vocos vocoder to TensorRT
-# 5. Creates model.tar.gz for S3 upload
-# 6. Builds and pushes Docker image to ECR
+# 3. Builds TensorRT engines optimized for T4 GPU with FP16 precision
+# 4. Exports Vocos vocoder to TensorRT with FP16 optimization
+# 5. Creates model.tar.gz for S3 upload (Triton model repository structure)
+# 6. Builds and pushes Docker image to ECR (without baked-in models)
+#
+# Reference: https://aws.amazon.com/blogs/machine-learning/host-ml-models-on-amazon-sagemaker-using-triton-tensorrt-models/
 
 set -e  # Exit on error
 
@@ -115,6 +130,57 @@ echo "[Stage 4] Creating model.tar.gz for SageMaker..."
 tar -czf model.tar.gz -C $MODEL_REPO .
 echo "Created model.tar.gz ($(du -h model.tar.gz | cut -f1))"
 
+# Verify tar.gz structure (critical for SageMaker deployment)
+echo ""
+echo "[Stage 4] Verifying model.tar.gz structure..."
+echo "Expected structure:"
+echo "  f5_tts/"
+echo "    config.pbtxt"
+echo "    1/"
+echo "      model.py"
+echo "      f5_tts_trtllm.py"
+echo "      (TensorRT engine files)"
+echo "  vocoder/"
+echo "    config.pbtxt"
+echo "    1/"
+echo "      vocoder.plan"
+echo ""
+echo "Actual contents (first 30 files):"
+tar -tzf model.tar.gz | head -30
+echo ""
+echo "Total files in archive: $(tar -tzf model.tar.gz | wc -l)"
+echo ""
+
+# Validate critical files are present
+echo "[Stage 4] Validating critical files..."
+REQUIRED_FILES=(
+    "f5_tts/config.pbtxt"
+    "f5_tts/1/model.py"
+    "vocoder/config.pbtxt"
+    "vocoder/1/vocoder.plan"
+)
+
+VALIDATION_FAILED=0
+for file in "${REQUIRED_FILES[@]}"; do
+    if tar -tzf model.tar.gz | grep -q "^${file}$"; then
+        echo "  ✓ Found: $file"
+    else
+        echo "  ✗ MISSING: $file"
+        VALIDATION_FAILED=1
+    fi
+done
+
+if [ $VALIDATION_FAILED -eq 1 ]; then
+    echo ""
+    echo "ERROR: Model archive is missing required files!"
+    echo "SageMaker deployment will fail. Please fix the model repository structure."
+    exit 1
+fi
+
+echo ""
+echo "✓ Model archive validation passed!"
+echo ""
+
 # Stage 5: Build and push Docker image to ECR
 echo "[Stage 5] Building Docker image for SageMaker..."
 
@@ -141,10 +207,16 @@ echo "=================================================="
 echo "Model archive: model.tar.gz"
 echo "Docker image: $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest"
 echo ""
+echo "IMPORTANT: TensorRT engines built for NVIDIA T4 GPU (CUDA Compute 7.5)"
+echo "These engines will ONLY work on SageMaker ml.g4dn.xlarge instances."
+echo ""
 echo "Next steps:"
 echo "1. Upload model.tar.gz to S3:"
 echo "   aws s3 cp model.tar.gz s3://champion-recap-models-$AWS_ACCOUNT/f5tts-triton-trtllm/"
 echo ""
-echo "2. Deploy CDK stack:"
+echo "2. Deploy CDK stack (will create ml.g4dn.xlarge endpoint):"
 echo "   cd ../aws-cdk && cdk deploy"
+echo ""
+echo "3. Verify deployment:"
+echo "   aws sagemaker describe-endpoint --endpoint-name f5tts-voice-generator"
 echo "=================================================="

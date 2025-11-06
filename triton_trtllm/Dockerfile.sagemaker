@@ -21,13 +21,11 @@ RUN pip install --no-cache-dir \
     soundfile
 
 # Set working directory
+# SageMaker will download model.tar.gz from S3 and extract to /opt/ml/model/
+# DO NOT bake models into the Docker image - SageMaker manages model loading
 WORKDIR /opt/ml/model
 
-# Copy model repository structure
-# This will be populated with actual models during SageMaker deployment
-COPY model_repo_f5_tts /opt/ml/model/
-
-# Copy helper scripts
+# Copy helper scripts only (models loaded from S3 at runtime)
 COPY scripts /opt/ml/scripts/
 
 # Environment variables for SageMaker

@@ -26,6 +26,9 @@
 
 set -e  # Exit on error
 
+# Add Hugging Face CLI to PATH (standalone installer location)
+export PATH="$HOME/.local/bin:$PATH"
+
 # Configuration
 MODEL=${1:-F5TTS_v1_Base}  # F5TTS_v1_Base | F5TTS_Base | F5TTS_v1_Small | F5TTS_Small
 AWS_REGION=${AWS_REGION:-us-east-1}
@@ -65,7 +68,7 @@ echo "=================================================="
 # Stage 0: Download F5-TTS model from HuggingFace
 echo "[Stage 0] Downloading F5-TTS model from HuggingFace..."
 if [ ! -d "$CKPT_DIR/$MODEL" ]; then
-    huggingface-cli download SWivid/F5-TTS $MODEL/model_*.* $MODEL/vocab.txt --local-dir $CKPT_DIR
+    hf download SWivid/F5-TTS $MODEL/model_*.* $MODEL/vocab.txt --local-dir $CKPT_DIR
 else
     echo "Model already downloaded, skipping..."
 fi

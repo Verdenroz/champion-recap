@@ -79,37 +79,72 @@ vocab_file=$CKPT_DIR/$MODEL/vocab.txt
 echo "Using checkpoint: $ckpt_file"
 echo "Using vocab: $vocab_file"
 
-# Stage 1: Convert checkpoint to TensorRT-LLM
-echo "[Stage 1] Converting checkpoint to TensorRT-LLM..."
-if [ ! -d "$TRTLLM_ENGINE_DIR" ]; then
-    python3 scripts/convert_checkpoint.py \
-        --pytorch_ckpt $ckpt_file \
-        --output_dir $TRTLLM_CKPT_DIR \
-        --model_name $MODEL
+# Stage 1-2: Build TensorRT engines inside Docker container
+# This avoids CUDA version mismatches on the host system
+echo "[Stage 1-2] Building TensorRT-LLM Docker image..."
+BUILDER_IMAGE="f5tts-tensorrt-builder:latest"
 
-    # Copy patched F5TTS model to TensorRT-LLM
-    python_package_path=/usr/local/lib/python3.12/dist-packages
-    cp -r patch/* $python_package_path/tensorrt_llm/models
+if [ ! -d "$TRTLLM_ENGINE_DIR" ] || [ ! -f "$VOCODER_TRT_ENGINE_PATH" ]; then
+    # Build the Docker image with TensorRT-LLM environment
+    docker build -t $BUILDER_IMAGE -f Dockerfile.server .
 
-    # Build TensorRT-LLM engine
-    trtllm-build --checkpoint_dir $TRTLLM_CKPT_DIR \
-        --max_batch_size 8 \
-        --output_dir $TRTLLM_ENGINE_DIR \
-        --remove_input_padding disable
+    echo "[Stage 1-2] Running TensorRT engine build inside Docker container..."
+    echo "This will:"
+    echo "  - Convert F5-TTS checkpoint to TensorRT-LLM format"
+    echo "  - Build TensorRT engines optimized for T4 GPU"
+    echo "  - Export Vocos vocoder to TensorRT"
+    echo ""
+
+    # Run the build inside the container with GPU access
+    # Mount volumes:
+    #   - Current directory to /workspace (scripts, patch, model_repo_f5_tts)
+    #   - ckpts to /workspace/ckpts (persists downloaded models and built engines)
+    docker run --rm --gpus all \
+        -v "$(pwd):/workspace" \
+        -w /workspace \
+        $BUILDER_IMAGE \
+        bash -c "
+            set -e
+
+            # Stage 1: Convert checkpoint and build TensorRT-LLM engine
+            if [ ! -d '$TRTLLM_ENGINE_DIR' ]; then
+                echo '[Container Stage 1] Converting checkpoint to TensorRT-LLM...'
+                python3 scripts/convert_checkpoint.py \
+                    --pytorch_ckpt $ckpt_file \
+                    --output_dir $TRTLLM_CKPT_DIR \
+                    --model_name $MODEL
+
+                echo '[Container Stage 1] Copying patched F5TTS model...'
+                cp -r patch/* /usr/local/lib/python3.12/dist-packages/tensorrt_llm/models/
+
+                echo '[Container Stage 1] Building TensorRT-LLM engine...'
+                trtllm-build --checkpoint_dir $TRTLLM_CKPT_DIR \
+                    --max_batch_size 8 \
+                    --output_dir $TRTLLM_ENGINE_DIR \
+                    --remove_input_padding disable
+            else
+                echo '[Container Stage 1] TensorRT-LLM engine already built, skipping...'
+            fi
+
+            # Stage 2: Export Vocos vocoder to TensorRT
+            if [ ! -f '$VOCODER_TRT_ENGINE_PATH' ]; then
+                echo '[Container Stage 2] Exporting Vocos vocoder to ONNX...'
+                python3 scripts/export_vocoder_to_onnx.py \
+                    --vocoder vocos \
+                    --output-path $VOCODER_ONNX_PATH
+
+                echo '[Container Stage 2] Converting Vocos to TensorRT...'
+                bash scripts/export_vocos_trt.sh $VOCODER_ONNX_PATH $VOCODER_TRT_ENGINE_PATH
+            else
+                echo '[Container Stage 2] Vocoder TensorRT engine already exists, skipping...'
+            fi
+
+            echo '[Container] Build stages complete!'
+        "
+
+    echo "[Stage 1-2] Docker container build complete!"
 else
-    echo "TensorRT-LLM engine already built, skipping..."
-fi
-
-# Stage 2: Export Vocos vocoder to TensorRT
-echo "[Stage 2] Exporting Vocos vocoder to TensorRT..."
-if [ ! -f "$VOCODER_TRT_ENGINE_PATH" ]; then
-    python3 scripts/export_vocoder_to_onnx.py \
-        --vocoder vocos \
-        --output-path $VOCODER_ONNX_PATH
-
-    bash scripts/export_vocos_trt.sh $VOCODER_ONNX_PATH $VOCODER_TRT_ENGINE_PATH
-else
-    echo "Vocoder TensorRT engine already exists, skipping..."
+    echo "[Stage 1-2] TensorRT engines already built, skipping Docker build..."
 fi
 
 # Stage 3: Build Triton model repository

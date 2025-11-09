@@ -53,3 +53,27 @@ def send_websocket_message(
                 print(f"Error clearing connection from session: {e}")
     except Exception as e:
         print(f"Error sending WebSocket message: {e}")
+
+
+def send_error_message(
+    connection_id: str,
+    error_message: str,
+    error_type: str = 'processing_error',
+    session_id: Optional[str] = None
+) -> None:
+    """
+    Send an error notification to a WebSocket connection.
+
+    Args:
+        connection_id: WebSocket connection ID
+        error_message: Human-readable error message
+        error_type: Type of error (processing_error, timeout, agent_error, etc.)
+        session_id: Optional session ID for clearing stale connections
+    """
+    message = {
+        'type': 'error',
+        'error_type': error_type,
+        'message': error_message
+    }
+
+    send_websocket_message(connection_id, message, session_id)

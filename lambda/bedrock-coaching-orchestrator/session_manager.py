@@ -52,6 +52,7 @@ class SessionManager:
             'champion_personality': champion_personality,
             'total_matches': total_matches,
             'processed_matches': 0,
+            'last_match_index_sent': 0,  # Track which matches have been sent to agent
             'status': 'active',
             'created_at': now,
             'updated_at': now,
@@ -102,6 +103,39 @@ class SessionManager:
             }
         )
 
+    def mark_failed(self, error_message: str) -> None:
+        """
+        Mark the session as failed with an error message.
+
+        Args:
+            error_message: Description of the error that caused the failure
+        """
+        table.update_item(
+            Key={'session_id': self.session_id},
+            UpdateExpression='SET #status = :status, error_message = :error, updated_at = :now',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':status': 'failed',
+                ':error': error_message,
+                ':now': int(time.time())
+            }
+        )
+
+    def mark_disconnected(self) -> None:
+        """
+        Mark the session as disconnected (user closed WebSocket).
+        Session can be resumed later.
+        """
+        table.update_item(
+            Key={'session_id': self.session_id},
+            UpdateExpression='SET #status = :status, updated_at = :now',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':status': 'disconnected',
+                ':now': int(time.time())
+            }
+        )
+
     def add_observation(self, observation: Dict[str, Any]) -> None:
         """
         Add an observation to the session's history.
@@ -130,6 +164,34 @@ class SessionManager:
             Key={'session_id': self.session_id},
             UpdateExpression='REMOVE connection_id SET updated_at = :now',
             ExpressionAttributeValues={
+                ':now': int(time.time())
+            }
+        )
+
+    def get_last_match_index_sent(self) -> int:
+        """
+        Get the index of the last match sent to the Bedrock Agent.
+
+        Returns:
+            Last match index (0-based) or 0 if none sent yet
+        """
+        session = self.get_session()
+        if not session:
+            return 0
+        return int(session.get('last_match_index_sent', 0))
+
+    def update_last_match_index_sent(self, match_index: int) -> None:
+        """
+        Update the index of the last match sent to the agent.
+
+        Args:
+            match_index: 0-based index of the last match sent
+        """
+        table.update_item(
+            Key={'session_id': self.session_id},
+            UpdateExpression='SET last_match_index_sent = :index, updated_at = :now',
+            ExpressionAttributeValues={
+                ':index': match_index,
                 ':now': int(time.time())
             }
         )

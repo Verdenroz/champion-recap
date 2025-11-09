@@ -120,9 +120,13 @@ def handle_generate_quick_remark(
     # Get champion personality from session attributes
     champion_id = session_attributes.get('championPersonality', 'default')
 
-    print(f"Generating quick remark for {champion_id}: {remark_text[:50]}...")
+    # Log champion usage for voice generation tracking
+    if not champion_id or champion_id == 'default':
+        print(f"WARNING: Using default champion voice (session has no personality set)")
 
-    # Generate voice using SageMaker
+    print(f"Generating quick remark for champion '{champion_id}': {remark_text[:50]}...")
+
+    # Generate voice using SageMaker (will fallback to 'default' if champion voice not found)
     try:
         voice_result = generate_voice(
             champion_id=champion_id,
@@ -206,9 +210,13 @@ def handle_generate_concluding_remark(
     # Get champion personality from session attributes
     champion_id = session_attributes.get('championPersonality', 'default')
 
-    print(f"Generating concluding remark for {champion_id}: {conclusion_text[:50]}...")
+    # Log champion usage for voice generation tracking
+    if not champion_id or champion_id == 'default':
+        print(f"WARNING: Using default champion voice (session has no personality set)")
 
-    # Generate voice using SageMaker
+    print(f"Generating concluding remark for champion '{champion_id}': {conclusion_text[:50]}...")
+
+    # Generate voice using SageMaker (will fallback to 'default' if champion voice not found)
     try:
         voice_result = generate_voice(
             champion_id=champion_id,

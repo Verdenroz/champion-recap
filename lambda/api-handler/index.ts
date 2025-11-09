@@ -216,6 +216,9 @@ export async function handler(event: APIGatewayEvent) {
 				// This will fetch match IDs from Riot and update DynamoDB with the correct totalMatches
 				await triggerMatchFetch(gameName, tagLine, platform, region, currentYear);
 
+				// Extract highest mastery champion for coaching voice personality
+				const topChampion = topChampionMastery.length > 0 ? topChampionMastery[0] : null;
+
 				// Return complete player info immediately
 				return {
 					statusCode: 202,
@@ -224,6 +227,7 @@ export async function handler(event: APIGatewayEvent) {
 						message: 'Processing started',
 						status: 'PENDING',
 						puuid: puuid,
+						topChampion: topChampion, // Highest mastery champion for coaching
 						account: {
 							...account,
 							summoner,

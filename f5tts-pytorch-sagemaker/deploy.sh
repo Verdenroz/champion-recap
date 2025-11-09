@@ -41,15 +41,15 @@ echo ""
 echo "[Step 2] Packaging model for SageMaker..."
 MODEL_DIR="./model"
 rm -rf $MODEL_DIR
-mkdir -p $MODEL_DIR
+mkdir -p $MODEL_DIR/code
 
-# Copy model files
+# Copy model files to root
 cp $ckpt_file $MODEL_DIR/model.safetensors
 cp $vocab_file $MODEL_DIR/vocab.txt
 
-# Copy inference code
-cp inference.py $MODEL_DIR/
-cp requirements.txt $MODEL_DIR/
+# Copy inference code to code/ subdirectory (AWS PyTorch requirement)
+cp inference.py $MODEL_DIR/code/
+cp requirements.txt $MODEL_DIR/code/
 
 # Create model.tar.gz
 tar -czf model.tar.gz -C $MODEL_DIR .

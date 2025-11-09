@@ -205,8 +205,8 @@ export function aggregateChampionStats(matches: MatchDto[], playerPuuid: string)
 				teammateChampionMap.set(key, stats);
 			}
 
-			// Update lane opponent stats (nemesis)
-			if (analysis.laneOpponent) {
+			// Update lane opponent stats (nemesis) - skip Invalid positions
+			if (analysis.laneOpponent && isValidPosition(analysis.laneOpponent.role)) {
 				const stats = laneOpponentMap.get(analysis.laneOpponent.championId) || {
 					name: analysis.laneOpponent.championName,
 					role: analysis.laneOpponent.role,

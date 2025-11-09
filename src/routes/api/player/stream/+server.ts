@@ -4,6 +4,8 @@ import type { RequestHandler } from './$types';
 /**
  * Server-Sent Events (SSE) endpoint for progressive player data loading
  * This polls the AWS backend and streams updates to the frontend
+ *
+ * Supports resume capability for interrupted sessions via puuid parameter
  */
 export const GET: RequestHandler = async ({ url }) => {
 	const gameName = url.searchParams.get('gameName');
@@ -13,8 +15,12 @@ export const GET: RequestHandler = async ({ url }) => {
 	const yearParam = url.searchParams.get('year');
 	const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
 
-	if (!gameName || !tagLine) {
-		return new Response(JSON.stringify({ error: 'gameName and tagLine are required' }), {
+	// Resume parameter for reconnecting to existing sessions
+	const resumePuuid = url.searchParams.get('puuid');
+
+	// Validate required parameters (either new session or resume)
+	if (!resumePuuid && (!gameName || !tagLine)) {
+		return new Response(JSON.stringify({ error: 'gameName and tagLine are required (or puuid for resume)' }), {
 			status: 400,
 			headers: { 'Content-Type': 'application/json' }
 		});
@@ -26,49 +32,94 @@ export const GET: RequestHandler = async ({ url }) => {
 			const encoder = new TextEncoder();
 
 			try {
-				// Step 1: Trigger processing on AWS and get complete account data
-				const triggerUrl = `${PUBLIC_AWS_API_URL}/player?gameName=${encodeURIComponent(gameName)}&tagLine=${encodeURIComponent(tagLine)}&platform=${platform}&region=${region}&year=${year}`;
+				let puuid: string;
+				let account: any = null;
+				let topChampion: any = null;
 
-				const triggerResponse = await fetch(triggerUrl);
+				// Step 1: Either resume existing session or trigger new processing
+				if (resumePuuid) {
+					// Resume mode: skip trigger, use provided PUUID
+					puuid = resumePuuid;
+					console.log(`Resuming session for PUUID: ${puuid}`);
 
-				// Handle specific error cases
-				if (!triggerResponse.ok) {
-					const errorData = await triggerResponse.json();
+					// Send resume notification
+					controller.enqueue(
+						encoder.encode(
+							`data: ${JSON.stringify({
+								type: 'resumed',
+								puuid: puuid,
+								message: 'Reconnected to existing session'
+							})}\n\n`
+						)
+					);
+				} else {
+					// New session: trigger processing on AWS and get complete account data
+					const triggerUrl = `${PUBLIC_AWS_API_URL}/player?gameName=${encodeURIComponent(gameName!)}&tagLine=${encodeURIComponent(tagLine!)}&platform=${platform}&region=${region}&year=${year}`;
 
-					if (triggerResponse.status === 429) {
-						throw new Error('Rate limited by Riot API. Please try again in a few seconds.');
+					const triggerResponse = await fetch(triggerUrl);
+
+					// Handle specific error cases
+					if (!triggerResponse.ok) {
+						const errorData = await triggerResponse.json();
+
+						if (triggerResponse.status === 429) {
+							throw new Error('Rate limited by Riot API. Please try again in a few seconds.');
+						}
+						if (triggerResponse.status === 404) {
+							throw new Error('Player not found. Please check the game name and tag line.');
+						}
+
+						throw new Error(errorData.message || 'Failed to trigger processing');
 					}
-					if (triggerResponse.status === 404) {
-						throw new Error('Player not found. Please check the game name and tag line.');
+
+					const triggerData = await triggerResponse.json();
+					puuid = triggerData.puuid;
+					account = triggerData.account;
+					topChampion = triggerData.topChampion;
+
+					if (!puuid) {
+						throw new Error('Failed to get player PUUID from AWS');
 					}
 
-					throw new Error(errorData.message || 'Failed to trigger processing');
+					// Send complete account data immediately (summoner, ranked, mastery)
+					controller.enqueue(
+						encoder.encode(
+							`data: ${JSON.stringify({
+								type: 'player_info',
+								account: account,
+								topChampion: topChampion,
+								puuid: puuid // Include for client-side resume capability
+							})}\n\n`
+						)
+					);
 				}
 
-				const triggerData = await triggerResponse.json();
-				const puuid = triggerData.puuid;
-				const account = triggerData.account;
-
-				if (!puuid) {
-					throw new Error('Failed to get player PUUID from AWS');
-				}
-
-				// Send complete account data immediately (summoner, ranked, mastery)
-				controller.enqueue(
-					encoder.encode(
-						`data: ${JSON.stringify({
-							type: 'player_info',
-							account: account
-						})}\n\n`
-					)
-				);
+				// Note: Welcome message is now handled by WebSocket $connect handler
+				// when the coaching session is initiated. This provides better real-time
+				// feedback and keeps the SSE stream focused on match processing updates.
 
 				// Step 2: Poll for progressive results until complete
 				// Poll at a consistent rate (every 5 seconds) until processing is complete
 				const pollInterval = 5000; // 5 seconds between polls
+				const maxDuration = 600000; // 10 minutes timeout
+				const startTime = Date.now();
 
-				// Poll indefinitely until complete
+				// Poll with timeout
 				while (true) {
+					// Check timeout
+					if (Date.now() - startTime > maxDuration) {
+						controller.enqueue(
+							encoder.encode(
+								`data: ${JSON.stringify({
+									type: 'timeout',
+									message: 'Session timeout. You can resume by reconnecting.',
+									puuid: puuid
+								})}\n\n`
+							)
+						);
+						controller.close();
+						return;
+					}
 					await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
 					// First, check player status for progress info

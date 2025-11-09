@@ -24,7 +24,33 @@ export interface AccountData {
 }
 
 /**
- * Complete recap data including champion statistics
+ * Individual match summary for match feed display
+ * Lightweight representation of match data for op.gg-style UI
+ */
+export interface MatchSummary {
+	matchId: string;
+	gameCreation: number;
+	gameDuration: number;
+	gameMode: string;
+	queueId: number;
+	championName: string;
+	championId: number;
+	kills: number;
+	deaths: number;
+	assists: number;
+	totalMinionsKilled: number;
+	visionScore: number;
+	win: boolean;
+	position: string;
+	items: number[];
+	summoner1Id: number;
+	summoner2Id: number;
+	teamChampions: number[]; // Champion IDs of your team (excluding you)
+	enemyChampions: number[]; // Champion IDs of enemy team
+}
+
+/**
+ * Complete recap data including champion statistics and match history
  * Used for displaying the full year-in-review
  */
 export interface RecapData {
@@ -33,4 +59,5 @@ export interface RecapData {
 		totalWins: number;
 		totalLosses: number;
 	};
+	matchHistory?: MatchSummary[];
 }

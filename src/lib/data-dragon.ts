@@ -389,3 +389,209 @@ export function calculateKDA(kills: number, deaths: number, assists: number): st
 export function formatNumber(num: number): string {
 	return num.toLocaleString();
 }
+
+/**
+ * Summoner spell ID to name mapping
+ * Based on Riot's official summoner spell IDs
+ */
+const SUMMONER_SPELL_MAP: Record<number, string> = {
+	1: 'SummonerBoost',        // Cleanse
+	3: 'SummonerExhaust',      // Exhaust
+	4: 'SummonerFlash',        // Flash
+	6: 'SummonerHaste',        // Ghost
+	7: 'SummonerHeal',         // Heal
+	11: 'SummonerSmite',       // Smite
+	12: 'SummonerTeleport',    // Teleport
+	13: 'SummonerMana',        // Clarity
+	14: 'SummonerDot',         // Ignite
+	21: 'SummonerBarrier',     // Barrier
+	30: 'SummonerPoroRecall',  // To the King! (ARAM)
+	31: 'SummonerPoroThrow',   // Poro Toss (ARAM)
+	32: 'SummonerSnowball',    // Mark/Dash (ARAM)
+	39: 'SummonerSnowURFBattle' // URF Snowball
+};
+
+/**
+ * Get summoner spell name from spell ID
+ */
+export function getSummonerSpellName(spellId: number): string {
+	return SUMMONER_SPELL_MAP[spellId] || 'SummonerFlash';
+}
+
+/**
+ * Get summoner spell icon URL from spell ID
+ */
+export function getSummonerSpellIconUrlById(spellId: number): string {
+	const spellName = getSummonerSpellName(spellId);
+	return getSummonerSpellIconUrl(spellName);
+}
+
+// ===================================
+// Strategic Gameplay Analysis Utilities
+// ===================================
+
+/**
+ * Vision score benchmarks by role (per minute)
+ * Based on average competitive/high-elo standards
+ */
+const VISION_SCORE_BENCHMARKS: Record<
+	string,
+	{ excellent: number; good: number; average: number; poor: number }
+> = {
+	SUPPORT: { excellent: 3.5, good: 2.5, average: 1.8, poor: 1.2 },
+	JUNGLE: { excellent: 2.5, good: 1.8, average: 1.3, poor: 0.8 },
+	TOP: { excellent: 1.5, good: 1.0, average: 0.7, poor: 0.4 },
+	MIDDLE: { excellent: 1.5, good: 1.0, average: 0.7, poor: 0.4 },
+	BOTTOM: { excellent: 2.0, good: 1.3, average: 0.9, poor: 0.5 }
+};
+
+/**
+ * Get vision score rating based on role and game duration
+ */
+export function getVisionScoreRating(
+	visionScore: number,
+	role: string,
+	durationSeconds: number
+): 'Excellent' | 'Good' | 'Average' | 'Needs Improvement' {
+	const durationMinutes = durationSeconds / 60;
+	const visionPerMinute = visionScore / durationMinutes;
+
+	// Normalize role name
+	const normalizedRole = role.toUpperCase();
+	const benchmarks = VISION_SCORE_BENCHMARKS[normalizedRole] || VISION_SCORE_BENCHMARKS.MIDDLE;
+
+	if (visionPerMinute >= benchmarks.excellent) return 'Excellent';
+	if (visionPerMinute >= benchmarks.good) return 'Good';
+	if (visionPerMinute >= benchmarks.average) return 'Average';
+	return 'Needs Improvement';
+}
+
+/**
+ * Get vision score per minute for display
+ */
+export function getVisionScorePerMinute(visionScore: number, durationSeconds: number): number {
+	const durationMinutes = durationSeconds / 60;
+	return Number((visionScore / durationMinutes).toFixed(2));
+}
+
+/**
+ * Damage share benchmarks by role
+ */
+const DAMAGE_SHARE_BENCHMARKS: Record<
+	string,
+	{ excellent: number; good: number; average: number }
+> = {
+	TOP: { excellent: 0.25, good: 0.20, average: 0.15 },
+	JUNGLE: { excellent: 0.22, good: 0.17, average: 0.13 },
+	MIDDLE: { excellent: 0.28, good: 0.23, average: 0.18 },
+	BOTTOM: { excellent: 0.30, good: 0.25, average: 0.20 },
+	SUPPORT: { excellent: 0.12, good: 0.08, average: 0.05 }
+};
+
+/**
+ * Get damage share rating based on role
+ */
+export function getDamageShareRating(
+	damageShare: number,
+	role: string
+): 'Excellent' | 'Good' | 'Average' | 'Needs Improvement' {
+	const normalizedRole = role.toUpperCase();
+	const benchmarks = DAMAGE_SHARE_BENCHMARKS[normalizedRole] || DAMAGE_SHARE_BENCHMARKS.MIDDLE;
+
+	if (damageShare >= benchmarks.excellent) return 'Excellent';
+	if (damageShare >= benchmarks.good) return 'Good';
+	if (damageShare >= benchmarks.average) return 'Average';
+	return 'Needs Improvement';
+}
+
+/**
+ * Calculate positioning quality based on damage dealt vs damage taken
+ * Higher ratio = better positioning (dealing damage while staying safe)
+ */
+export function getPositioningQuality(
+	damageDealt: number,
+	damageTaken: number
+): 'Excellent' | 'Good' | 'Average' | 'Needs Improvement' {
+	if (damageTaken === 0) return 'Excellent'; // Rare but perfect
+
+	const ratio = damageDealt / damageTaken;
+
+	if (ratio >= 2.0) return 'Excellent'; // Dealt 2x damage taken
+	if (ratio >= 1.2) return 'Good'; // Dealt more than taken
+	if (ratio >= 0.8) return 'Average'; // Roughly equal
+	return 'Needs Improvement'; // Took more damage than dealt
+}
+
+/**
+ * Calculate gold efficiency score
+ * Compares gold earned to expected gold from CS + kills/assists
+ */
+export function getGoldEfficiency(
+	goldEarned: number,
+	cs: number,
+	kills: number,
+	assists: number
+): 'Excellent' | 'Good' | 'Average' | 'Needs Improvement' {
+	// Estimated gold from sources
+	const csGold = cs * 20; // Average ~20g per CS
+	const killGold = kills * 300; // Base kill gold
+	const assistGold = assists * 150; // Base assist gold
+	const expectedGold = csGold + killGold + assistGold;
+
+	// Actual gold includes objectives, towers, passive income
+	const efficiency = goldEarned / (expectedGold || 1);
+
+	if (efficiency >= 1.4) return 'Excellent'; // 40% above expected (great objectives)
+	if (efficiency >= 1.2) return 'Good'; // 20% above expected
+	if (efficiency >= 1.0) return 'Average'; // Meeting expectations
+	return 'Needs Improvement'; // Below expected (missing objectives/farm)
+}
+
+/**
+ * Objective participation assessment
+ */
+export interface ObjectiveAssessment {
+	dragonRating: 'High' | 'Medium' | 'Low';
+	baronRating: 'High' | 'Medium' | 'Low';
+	towerRating: 'High' | 'Medium' | 'Low';
+	overall: 'Excellent' | 'Good' | 'Average' | 'Needs Improvement';
+}
+
+/**
+ * Assess objective participation across all objective types
+ */
+export function assessObjectiveParticipation(
+	dragonTakedowns: number,
+	baronTakedowns: number,
+	turretTakedowns: number,
+	gameDurationMinutes: number
+): ObjectiveAssessment {
+	// Normalize to per-20-minutes
+	const scaleFactor = 20 / gameDurationMinutes;
+
+	const scaledDragons = dragonTakedowns * scaleFactor;
+	const scaledBarons = baronTakedowns * scaleFactor;
+	const scaledTurrets = turretTakedowns * scaleFactor;
+
+	// Dragon rating (expect 1-2 per 20 min)
+	const dragonRating = scaledDragons >= 2 ? 'High' : scaledDragons >= 1 ? 'Medium' : 'Low';
+
+	// Baron rating (expect 0.5-1 per 20 min in longer games)
+	const baronRating = scaledBarons >= 1 ? 'High' : scaledBarons >= 0.5 ? 'Medium' : 'Low';
+
+	// Turret rating (expect 3-5 per 20 min)
+	const towerRating = scaledTurrets >= 5 ? 'High' : scaledTurrets >= 3 ? 'Medium' : 'Low';
+
+	// Overall assessment
+	const ratings = [dragonRating, baronRating, towerRating];
+	const highCount = ratings.filter((r) => r === 'High').length;
+	const mediumCount = ratings.filter((r) => r === 'Medium').length;
+
+	let overall: ObjectiveAssessment['overall'];
+	if (highCount >= 2) overall = 'Excellent';
+	else if (highCount >= 1 && mediumCount >= 1) overall = 'Good';
+	else if (mediumCount >= 2) overall = 'Average';
+	else overall = 'Needs Improvement';
+
+	return { dragonRating, baronRating, towerRating, overall };
+}

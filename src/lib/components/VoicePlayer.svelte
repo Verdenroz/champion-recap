@@ -8,9 +8,10 @@
 		autoplay?: boolean;
 		compact?: boolean;
 		onEnd?: () => void;
+		onReady?: () => void;
 	}
 
-	let { audioUrl, championName, autoplay = false, compact = false, onEnd }: VoicePlayerProps = $props();
+	let { audioUrl, championName, autoplay = false, compact = false, onEnd, onReady }: VoicePlayerProps = $props();
 
 	let isPlaying = $state(false);
 	let progress = $state(0);
@@ -26,6 +27,8 @@
 			preload: true,
 			onload: () => {
 				duration = sound?.duration() || 0;
+				// Notify parent component that audio is ready
+				onReady?.();
 				if (autoplay) {
 					play();
 				}

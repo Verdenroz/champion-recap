@@ -1,6 +1,15 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { getChampionIconUrl, getProfileIconUrl, getChampionNameById } from '$lib/data-dragon';
+	import {
+		getChampionIconUrl,
+		getProfileIconUrl,
+		getChampionNameById,
+		getQueueName,
+		getItemIconUrl,
+		formatGameDuration,
+		calculateKDA,
+		getSummonerSpellIconUrlById
+	} from '$lib/data-dragon';
 	import autoAnimate from '@formkit/auto-animate';
 	import VoicePlayer from '$lib/components/VoicePlayer.svelte';
 	import TypewriterText from '$lib/components/TypewriterText.svelte';
@@ -142,9 +151,20 @@
 		return Math.min(100, (processedMatches / totalMatches) * 100);
 	});
 
-	// Get voice for top champion (when available)
-	let topChampion = $derived(recapData?.stats?.top3Champions?.[0]?.championName || '');
+	// Get voice for top champion (highest mastery from Riot API)
+	// Use highest mastery champion (available immediately) instead of most played (requires match processing)
+	let topChampionId = $derived(accountData?.topChampionMastery?.[0]?.championId);
+	let topChampion = $state('');
 	let championVoiceQuery = $derived(topChampion ? useChampionVoice(topChampion) : null);
+
+	// Convert championId to champion name using Data Dragon
+	$effect(() => {
+		if (topChampionId) {
+			getChampionNameById(topChampionId).then((name) => {
+				topChampion = name;
+			});
+		}
+	});
 
 	// Show typewriter for complete status
 	let showTypewriter = $state(false);
@@ -181,7 +201,7 @@
 			console.log('[Coaching] Session initialized:', data);
 
 			// Connect to WebSocket
-			coachingSession = useCoachingWebSocket(data.wsUrl, data.sessionId);
+			coachingSession = useCoachingWebSocket(data.wsUrl, data.sessionId, accountData.puuid, topChampion);
 			showCoaching = true;
 
 			console.log('[Coaching] WebSocket connected');
@@ -689,6 +709,190 @@
 							</div>
 						</div>
 					{/if}
+				</div>
+			</div>
+		{/if}
+
+		<!-- Match History Feed (op.gg-style) -->
+		{#if recapData?.matchHistory && recapData.matchHistory.length > 0}
+			<div class="mt-8">
+				<div class="card bg-black/60 backdrop-blur-xl border-gray-800/50 shadow-xl">
+					<div class="card-body">
+						<h3 class="mb-6 text-3xl font-bold text-white flex items-center gap-3">
+							<span class="iconify lucide--sword w-8 h-8 text-primary-500"></span>
+							Recent Match History
+						</h3>
+						<div use:autoAnimate class="space-y-3">
+							{#each recapData.matchHistory as match}
+								<div
+									class="card bg-gradient-to-br from-gray-900 to-black border-l-4 {match.win
+										? 'border-l-green-500'
+										: 'border-l-red-500'} border-gray-700 hover:border-primary-500 transition-all duration-300 card-hover shadow-lg"
+								>
+									<div class="card-body p-4">
+										<div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+											<!-- Game Info -->
+											<div class="flex-shrink-0 w-full sm:w-auto">
+												<div class="flex items-center gap-2 mb-2">
+													<span class="badge badge-sm">{getQueueName(match.queueId)}</span>
+													<span
+														class="badge badge-sm {match.win
+															? 'badge-success'
+															: 'badge-error'}"
+													>
+														{match.win ? 'Victory' : 'Defeat'}
+													</span>
+													<span class="text-xs text-gray-400">
+														{formatGameDuration(match.gameDuration)}
+													</span>
+												</div>
+												<p class="text-xs text-gray-500">
+													{new Date(match.gameCreation).toLocaleDateString()}
+												</p>
+											</div>
+
+											<!-- Champion & Summoner Spells -->
+											<div class="flex items-center gap-3 flex-shrink-0">
+												<div class="flex gap-1">
+													<!-- Champion Icon -->
+													<div
+														class="h-14 w-14 overflow-hidden rounded-lg border-2 {match.win
+															? 'border-green-500'
+															: 'border-red-500'} shadow-lg"
+													>
+														<img
+															src={getChampionIconUrl(match.championName)}
+															alt={match.championName}
+															width="56"
+															height="56"
+															class="object-cover"
+														/>
+													</div>
+													<!-- Summoner Spells -->
+													<div class="flex flex-col gap-1">
+														<div class="h-6 w-6 overflow-hidden rounded border border-gray-600 bg-gray-800">
+															<img
+																src={getSummonerSpellIconUrlById(match.summoner1Id)}
+																alt="Summoner Spell 1"
+																width="24"
+																height="24"
+																class="object-cover"
+															/>
+														</div>
+														<div class="h-6 w-6 overflow-hidden rounded border border-gray-600 bg-gray-800">
+															<img
+																src={getSummonerSpellIconUrlById(match.summoner2Id)}
+																alt="Summoner Spell 2"
+																width="24"
+																height="24"
+																class="object-cover"
+															/>
+														</div>
+													</div>
+												</div>
+												<div>
+													<p class="text-sm font-bold text-white">
+														{match.championName}
+													</p>
+													<span class="badge badge-xs">{match.position || 'N/A'}</span>
+												</div>
+											</div>
+
+											<!-- KDA & Stats -->
+											<div class="flex-1 grid grid-cols-2 sm:grid-cols-3 gap-4">
+												<!-- KDA -->
+												<div>
+													<p class="text-xs text-gray-400 mb-1">KDA</p>
+													<p class="text-sm font-bold text-white">
+														{match.kills}/{match.deaths}/{match.assists}
+													</p>
+													<p class="text-xs text-primary-500">
+														{calculateKDA(match.kills, match.deaths, match.assists)} KDA
+													</p>
+												</div>
+
+												<!-- CS & Vision -->
+												<div>
+													<p class="text-xs text-gray-400 mb-1">CS / Vision</p>
+													<p class="text-sm font-bold text-white">
+														{match.totalMinionsKilled} CS
+													</p>
+													<p class="text-xs text-gray-400">
+														{match.visionScore} Vision
+													</p>
+												</div>
+
+												<!-- Items -->
+												<div class="col-span-2 sm:col-span-1">
+													<p class="text-xs text-gray-400 mb-1">Items</p>
+													<div class="flex gap-1 flex-wrap">
+														{#each match.items as itemId}
+															{#if itemId !== 0}
+																<div
+																	class="h-8 w-8 overflow-hidden rounded border border-gray-600 bg-gray-800"
+																>
+																	<img
+																		src={getItemIconUrl(itemId)}
+																		alt="Item {itemId}"
+																		width="32"
+																		height="32"
+																		class="object-cover"
+																	/>
+																</div>
+															{/if}
+														{/each}
+													</div>
+												</div>
+											</div>
+
+											<!-- Team Compositions -->
+											<div class="mt-3 pt-3 border-t border-gray-700/50 flex gap-6">
+												<!-- Your Team -->
+												<div class="flex-1">
+													<p class="text-xs text-gray-400 mb-2">Your Team</p>
+													<div class="flex gap-1">
+														{#each match.teamChampions as championId}
+															{#await getChampionNameById(championId) then championName}
+																<div class="h-7 w-7 overflow-hidden rounded border border-blue-500/50 bg-gray-800" title={championName}>
+																	<img
+																		src={getChampionIconUrl(championName)}
+																		alt={championName}
+																		width="28"
+																		height="28"
+																		class="object-cover"
+																	/>
+																</div>
+															{/await}
+														{/each}
+													</div>
+												</div>
+
+												<!-- Enemy Team -->
+												<div class="flex-1">
+													<p class="text-xs text-gray-400 mb-2">Enemy Team</p>
+													<div class="flex gap-1">
+														{#each match.enemyChampions as championId}
+															{#await getChampionNameById(championId) then championName}
+																<div class="h-7 w-7 overflow-hidden rounded border border-red-500/50 bg-gray-800" title={championName}>
+																	<img
+																		src={getChampionIconUrl(championName)}
+																		alt={championName}
+																		width="28"
+																		height="28"
+																		class="object-cover"
+																	/>
+																</div>
+															{/await}
+														{/each}
+													</div>
+												</div>
+											</div>
+										</div>
+									</div>
+								</div>
+							{/each}
+						</div>
+					</div>
 				</div>
 			</div>
 		{/if}

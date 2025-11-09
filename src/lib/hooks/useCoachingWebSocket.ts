@@ -35,11 +35,15 @@ export interface CoachingWebSocketStore {
  *
  * @param wsUrl - WebSocket URL from API Gateway
  * @param sessionId - Coaching session ID
+ * @param puuid - Player PUUID for session creation
+ * @param champion - Champion personality for coaching
  * @returns Store with connection state and observations
  */
 export function useCoachingWebSocket(
 	wsUrl: string,
-	sessionId: string
+	sessionId: string,
+	puuid: string,
+	champion: string
 ): CoachingWebSocketStore {
 	const connectionState = writable<CoachingConnectionState>('connecting');
 	const observations = writable<CoachingObservation[]>([]);
@@ -49,14 +53,15 @@ export function useCoachingWebSocket(
 
 	let ws: WebSocket | null = null;
 	let reconnectAttempts = 0;
-	const maxReconnectAttempts = 3;
+	const maxReconnectAttempts = 5;
+	let sessionObservationsCount = 0; // Track observations received before disconnect
 
 	function connect() {
 		try {
 			connectionState.set('connecting');
 
-			// Add session_id as query parameter
-			const url = `${wsUrl}?sessionId=${sessionId}`;
+			// Add session_id, puuid, and champion as query parameters
+			const url = `${wsUrl}?sessionId=${sessionId}&puuid=${puuid}&champion=${champion}`;
 			ws = new WebSocket(url);
 
 			ws.onopen = () => {
@@ -64,6 +69,20 @@ export function useCoachingWebSocket(
 				connectionState.set('connected');
 				reconnectAttempts = 0;
 				error.set(null);
+
+				// State sync: Send last observation count to server for resuming
+				// This allows server to re-send any missed observations
+				if (sessionObservationsCount > 0) {
+					console.log(
+						`[Coaching WebSocket] Syncing state: ${sessionObservationsCount} observations received`
+					);
+					ws?.send(
+						JSON.stringify({
+							action: 'sync',
+							lastObservationCount: sessionObservationsCount
+						})
+					);
+				}
 			};
 
 			ws.onmessage = (event) => {
@@ -89,8 +108,17 @@ export function useCoachingWebSocket(
 				// Attempt reconnect if not intentional close
 				if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
 					reconnectAttempts++;
-					console.log(`[Coaching WebSocket] Reconnecting... Attempt ${reconnectAttempts}`);
-					setTimeout(connect, 1000 * reconnectAttempts);
+					// Exponential backoff: 1s, 2s, 4s, 8s, 16s with jitter
+					const baseDelay = Math.pow(2, reconnectAttempts - 1) * 1000;
+					const jitter = Math.random() * 1000; // 0-1s jitter
+					const delay = baseDelay + jitter;
+
+					console.log(
+						`[Coaching WebSocket] Reconnecting... Attempt ${reconnectAttempts}/${maxReconnectAttempts} in ${Math.round(delay)}ms`
+					);
+					setTimeout(connect, delay);
+				} else if (reconnectAttempts >= maxReconnectAttempts) {
+					error.set('Failed to reconnect. Please refresh the page to resume.');
 				}
 			};
 		} catch (err) {
@@ -104,27 +132,43 @@ export function useCoachingWebSocket(
 		console.log('[Coaching WebSocket] Message:', message);
 
 		switch (message.type) {
-			case 'observation_token':
-				// Streaming token for current observation
-				currentMatchNumber.set(message.match_number);
-				currentObservation.update((text) => text + message.token);
+			case 'welcome':
+				// Welcome message with initial audio
+				const welcomeObs: CoachingObservation = {
+					matchNumber: 0,
+					text: message.text,
+					audioUrl: message.audio_url,
+					champion: message.champion,
+					timestamp: new Date().toISOString()
+				};
+				observations.update((obs) => [...obs, welcomeObs]);
+				sessionObservationsCount++; // Track for state sync
 				break;
 
-			case 'observation_complete':
-				// Complete observation with audio
-				const observation: CoachingObservation = {
+			case 'quick_remark':
+				// Quick remark observation (20-30 words)
+				const remarkObs: CoachingObservation = {
 					matchNumber: message.match_number,
 					text: message.text,
 					audioUrl: message.audio_url,
 					champion: message.champion,
 					timestamp: new Date().toISOString()
 				};
+				observations.update((obs) => [...obs, remarkObs]);
+				sessionObservationsCount++; // Track for state sync
+				break;
 
-				observations.update((obs) => [...obs, observation]);
-
-				// Reset current observation for next match
-				currentObservation.set('');
-				currentMatchNumber.set(null);
+			case 'conclusion':
+				// Final conclusion observation (80-100 words)
+				const conclusionObs: CoachingObservation = {
+					matchNumber: -1, // Special marker for conclusion
+					text: message.text,
+					audioUrl: message.audio_url,
+					champion: message.champion,
+					timestamp: new Date().toISOString()
+				};
+				observations.update((obs) => [...obs, conclusionObs]);
+				sessionObservationsCount++; // Track for state sync
 				break;
 
 			case 'error':

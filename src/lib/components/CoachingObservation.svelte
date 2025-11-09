@@ -12,6 +12,28 @@
 
 	let { observation, isStreaming = false, streamingText = '' }: Props = $props();
 
+	// Audio synchronization state - wait for audio to load before showing text
+	let audioLoaded = $state(false);
+	let audioStarted = $state(false);
+
+	// Callback when audio is ready to play
+	function handleAudioReady() {
+		audioLoaded = true;
+		// Small delay to ensure Howler is fully initialized, then trigger auto-play
+		setTimeout(() => {
+			audioStarted = true;
+		}, 100);
+	}
+
+	// Determine if we should show text (RPG-style sync)
+	// - If no audio URL: show text immediately
+	// - If audio URL exists: wait for audio to load and start
+	let shouldShowText = $derived(
+		!observation.audioUrl || // No audio - show immediately
+		isStreaming || // Streaming state - show immediately
+		audioStarted // Audio ready - show synchronized with playback
+	);
+
 	// Determine if this is a win or loss
 	let isPositive = $derived(
 		observation.text.toLowerCase().includes('win') ||
@@ -50,21 +72,33 @@
 					<span class="text-sm text-gray-400">{observation.champion}</span>
 				</div>
 
-				<!-- Observation Text -->
-				<div class="text-white leading-relaxed mb-4">
-					{#if isStreaming}
-						<TypewriterText text={streamingText} interval={20} cursor={true} />
-					{:else}
-						<TypewriterText text={observation.text} interval={15} cursor={false} />
-					{/if}
-				</div>
+				<!-- Audio Loading Indicator (RPG-style) -->
+				{#if observation.audioUrl && !audioStarted && !isStreaming}
+					<div class="flex items-center gap-2 text-sm text-purple-400 mb-4">
+						<span class="loading loading-spinner loading-sm"></span>
+						<span class="italic">{observation.champion} is speaking...</span>
+					</div>
+				{/if}
 
-				<!-- Voice Player (if audio available) -->
+				<!-- Observation Text (synchronized with audio) -->
+				{#if shouldShowText}
+					<div class="text-white leading-relaxed mb-4">
+						{#if isStreaming}
+							<TypewriterText text={streamingText} interval={20} cursor={true} />
+						{:else}
+							<TypewriterText text={observation.text} interval={15} cursor={false} />
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Voice Player (hidden but auto-plays when ready) -->
 				{#if !isStreaming && observation.audioUrl}
 					<VoicePlayer
 						audioUrl={observation.audioUrl}
 						championName={observation.champion}
 						compact={true}
+						autoplay={true}
+						onReady={handleAudioReady}
 					/>
 				{/if}
 

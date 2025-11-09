@@ -67,21 +67,21 @@ export class ChampionRecapStack extends cdk.Stack {
 		});
 
 		// Coaching Sessions Table
+		// Using session_id as partition key only - each session is unique
 		const coachingSessionsTable = new dynamodb.Table(this, 'CoachingSessionsTable', {
 			tableName: 'ChampionRecap-CoachingSessions',
 			partitionKey: { name: 'session_id', type: dynamodb.AttributeType.STRING },
-			sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
 			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
 			removalPolicy: cdk.RemovalPolicy.DESTROY,
 			pointInTimeRecovery: true,
 			timeToLiveAttribute: 'ttl'
 		});
 
-		// Global Secondary Index for querying by summoner
+		// Global Secondary Index for querying sessions by puuid
 		coachingSessionsTable.addGlobalSecondaryIndex({
-			indexName: 'SummonerIndex',
-			partitionKey: { name: 'summoner_id', type: dynamodb.AttributeType.STRING },
-			sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
+			indexName: 'PuuidIndex',
+			partitionKey: { name: 'puuid', type: dynamodb.AttributeType.STRING },
+			sortKey: { name: 'created_at', type: dynamodb.AttributeType.NUMBER },
 			projectionType: dynamodb.ProjectionType.ALL
 		});
 
@@ -90,28 +90,12 @@ export class ChampionRecapStack extends cdk.Stack {
 		// ===================================
 		const modelsBucket = s3.Bucket.fromBucketName(this, 'ModelsBucket', `champion-recap-models-${this.account}`);
 
-		// S3 Bucket for Generated Voices
-		const voicesBucket = new s3.Bucket(this, 'VoicesBucket', {
-			bucketName: `champion-recap-voices-${this.account}`,
-			versioned: false,
-			encryption: s3.BucketEncryption.S3_MANAGED,
-			lifecycleRules: [
-				{
-					id: 'expire-old-voices',
-					enabled: true,
-					expiration: cdk.Duration.days(30) // Cache for 30 days
-				}
-			],
-			removalPolicy: cdk.RemovalPolicy.DESTROY,
-			autoDeleteObjects: true,
-			cors: [
-				{
-					allowedMethods: [s3.HttpMethods.GET],
-					allowedOrigins: ['*'],
-					allowedHeaders: ['*']
-				}
-			]
-		});
+		// S3 Bucket for Generated Voices (import existing bucket)
+		const voicesBucket = s3.Bucket.fromBucketName(
+			this,
+			'VoicesBucket',
+			`champion-recap-voices-${this.account}`
+		);
 
 		// ===================================
 		// SQS Queues
@@ -152,8 +136,10 @@ export class ChampionRecapStack extends cdk.Stack {
 		const fetchMatchesFunction = new lambda.Function(this, 'FetchMatchesFunction', {
 			functionName: 'champion-recap-fetch-matches',
 			runtime: lambda.Runtime.NODEJS_20_X,
-			handler: 'index.handler',
-			code: lambda.Code.fromAsset('../lambda/fetch-matches/dist'),
+			handler: 'dist/index.handler',
+			code: lambda.Code.fromAsset('../lambda/fetch-matches', {
+				exclude: ['*.ts', 'tsconfig.json', 'src', '.git*', 'node_modules/.bin']
+			}),
 			timeout: cdk.Duration.minutes(15),
 			memorySize: 1024,
 			tracing: lambda.Tracing.ACTIVE,
@@ -177,8 +163,10 @@ export class ChampionRecapStack extends cdk.Stack {
 		const aggregateStatsFunction = new lambda.Function(this, 'AggregateStatsFunction', {
 			functionName: 'champion-recap-aggregate-stats',
 			runtime: lambda.Runtime.NODEJS_20_X,
-			handler: 'index.handler',
-			code: lambda.Code.fromAsset('../lambda/aggregate-stats/dist'),
+			handler: 'dist/index.handler',
+			code: lambda.Code.fromAsset('../lambda/aggregate-stats', {
+				exclude: ['*.ts', 'tsconfig.json', 'src', '.git*', 'node_modules/.bin']
+			}),
 			timeout: cdk.Duration.minutes(5),
 			memorySize: 2048,
 			tracing: lambda.Tracing.ACTIVE,
@@ -197,8 +185,10 @@ export class ChampionRecapStack extends cdk.Stack {
 		const apiHandlerFunction = new lambda.Function(this, 'ApiHandlerFunction', {
 			functionName: 'champion-recap-api-handler',
 			runtime: lambda.Runtime.NODEJS_20_X,
-			handler: 'index.handler',
-			code: lambda.Code.fromAsset('../lambda/api-handler/dist'),
+			handler: 'dist/index.handler',
+			code: lambda.Code.fromAsset('../lambda/api-handler', {
+				exclude: ['*.ts', 'tsconfig.json', 'src', '.git*', 'node_modules/.bin']
+			}),
 			timeout: cdk.Duration.seconds(30),
 			memorySize: 512,
 			tracing: lambda.Tracing.ACTIVE,
@@ -215,8 +205,10 @@ export class ChampionRecapStack extends cdk.Stack {
 		const processMatchFunction = new lambda.Function(this, 'ProcessMatchFunction', {
 			functionName: 'champion-recap-process-match',
 			runtime: lambda.Runtime.NODEJS_20_X,
-			handler: 'index.handler',
-			code: lambda.Code.fromAsset('../lambda/process-match/dist'),
+			handler: 'dist/index.handler',
+			code: lambda.Code.fromAsset('../lambda/process-match', {
+				exclude: ['*.ts', 'tsconfig.json', 'src', '.git*', 'node_modules/.bin']
+			}),
 			timeout: cdk.Duration.minutes(2),
 			memorySize: 512,
 			reservedConcurrentExecutions: 10, // Limit concurrency to protect Riot API rate limits
@@ -579,13 +571,22 @@ exports.handler = async (event) => {
 			handler: 'index.handler',
 			code: lambda.Code.fromInline(`
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { SageMakerRuntimeClient, InvokeEndpointCommand } = require('@aws-sdk/client-sagemaker-runtime');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { ApiGatewayManagementApiClient, PostToConnectionCommand } = require('@aws-sdk/client-apigatewaymanagementapi');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const sagemakerClient = new SageMakerRuntimeClient({});
+const s3Client = new S3Client({});
 
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE;
 const SESSIONS_TABLE = process.env.SESSIONS_TABLE;
+const VOICE_BUCKET = process.env.VOICE_BUCKET;
+const SAGEMAKER_ENDPOINT = process.env.SAGEMAKER_ENDPOINT;
+const WS_API_ENDPOINT = process.env.WS_API_ENDPOINT;
 
 exports.handler = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -594,6 +595,8 @@ exports.handler = async (event) => {
   // Extract sessionId from query parameters
   const queryParams = event.queryStringParameters || {};
   const sessionId = queryParams.sessionId;
+  const puuid = queryParams.puuid;
+  const champion = queryParams.champion;
 
   console.log(JSON.stringify({
     level: 'INFO',
@@ -617,33 +620,174 @@ exports.handler = async (event) => {
         return { statusCode: 400, body: 'Missing sessionId query parameter' };
       }
 
-      // Validate session exists in DynamoDB
+      // Create or update session in DynamoDB
       try {
         const sessionResult = await docClient.send(new GetCommand({
           TableName: SESSIONS_TABLE,
-          Key: { session_id: sessionId, timestamp: 0 } // Using composite key - may need adjustment
+          Key: { session_id: sessionId }
         }));
 
         if (!sessionResult.Item) {
+          // Session doesn't exist - create it if we have required data
+          if (!puuid || !champion) {
+            console.log(JSON.stringify({
+              level: 'WARN',
+              message: 'Cannot create session - missing puuid or champion',
+              connectionId,
+              sessionId,
+              timestamp: new Date().toISOString()
+            }));
+            return { statusCode: 400, body: 'Missing required parameters: puuid and champion' };
+          }
+
+          // Create new session
+          const now = Math.floor(Date.now() / 1000);
+          await docClient.send(new PutCommand({
+            TableName: SESSIONS_TABLE,
+            Item: {
+              session_id: sessionId,
+              puuid: puuid,
+              champion_personality: champion,
+              connection_id: connectionId,
+              status: 'ACTIVE',
+              created_at: now,
+              updated_at: now,
+              total_matches: 0,
+              processed_matches: 0,
+              observations: [],
+              ttl: now + (86400) // 24 hours
+            }
+          }));
+
           console.log(JSON.stringify({
-            level: 'WARN',
-            message: 'Connection rejected - invalid sessionId',
-            connectionId,
+            level: 'INFO',
+            message: 'Session created',
             sessionId,
+            puuid,
+            champion,
+            connectionId,
             timestamp: new Date().toISOString()
           }));
-          return { statusCode: 403, body: 'Invalid sessionId' };
+
+        } else {
+          // Session exists - update with connection ID
+          await docClient.send(new UpdateCommand({
+            TableName: SESSIONS_TABLE,
+            Key: { session_id: sessionId },
+            UpdateExpression: 'SET connection_id = :connId, updated_at = :now, #status = :status',
+            ExpressionAttributeValues: {
+              ':connId': connectionId,
+              ':now': Math.floor(Date.now() / 1000),
+              ':status': 'ACTIVE'
+            },
+            ExpressionAttributeNames: {
+              '#status': 'status'
+            }
+          }));
+
+          console.log(JSON.stringify({
+            level: 'INFO',
+            message: 'Session updated with connectionId',
+            sessionId,
+            connectionId,
+            timestamp: new Date().toISOString()
+          }));
         }
+
+        // Generate welcome message with voice
+        if (champion) {
+          try {
+            const welcomeMessages = {
+              'yasuo': "The path of the wanderer begins. Let me examine your journey, Summoner.",
+              'jinx': "Ooh, time to see what kind of chaos you've been causing! This is gonna be FUN!",
+              'thresh': "Another soul arrives for judgment. Let us see what patterns emerge from your battles.",
+              'ahri': "Welcome, Summoner. Let's see how gracefully you've been dancing through the Rift.",
+              'default': "Greetings, Summoner. Let me analyze your recent matches and provide guidance."
+            };
+
+            const welcomeText = welcomeMessages[champion.toLowerCase()] || welcomeMessages['default'];
+
+            // Invoke SageMaker endpoint for voice generation
+            const sagemakerPayload = {
+              champion_id: champion,
+              text: welcomeText,
+              voice_bucket: VOICE_BUCKET
+            };
+
+            const sagemakerCommand = new InvokeEndpointCommand({
+              EndpointName: SAGEMAKER_ENDPOINT,
+              ContentType: 'application/json',
+              Accept: 'application/json',
+              Body: JSON.stringify(sagemakerPayload)
+            });
+
+            const sagemakerResponse = await sagemakerClient.send(sagemakerCommand);
+            const responseBody = JSON.parse(new TextDecoder().decode(sagemakerResponse.Body));
+            const audioBytes = Buffer.from(responseBody.audio, 'base64');
+
+            // Save to S3
+            const audioKey = \`generated/\${champion}/welcome-\${Date.now()}.wav\`;
+            await s3Client.send(new PutObjectCommand({
+              Bucket: VOICE_BUCKET,
+              Key: audioKey,
+              Body: audioBytes,
+              ContentType: 'audio/wav'
+            }));
+
+            // Generate presigned URL
+            const audioUrl = await getSignedUrl(s3Client, new PutObjectCommand({
+              Bucket: VOICE_BUCKET,
+              Key: audioKey
+            }), { expiresIn: 3600 });
+
+            // Send welcome message to WebSocket
+            const apiGatewayClient = new ApiGatewayManagementApiClient({
+              endpoint: WS_API_ENDPOINT
+            });
+
+            await apiGatewayClient.send(new PostToConnectionCommand({
+              ConnectionId: connectionId,
+              Data: JSON.stringify({
+                type: 'welcome',
+                text: welcomeText,
+                audio_url: audioUrl,
+                champion: champion,
+                total_matches: 0,
+                matchNumber: 0
+              })
+            }));
+
+            console.log(JSON.stringify({
+              level: 'INFO',
+              message: 'Welcome message sent',
+              sessionId,
+              connectionId,
+              champion,
+              timestamp: new Date().toISOString()
+            }));
+          } catch (welcomeError) {
+            console.log(JSON.stringify({
+              level: 'ERROR',
+              message: 'Failed to generate welcome message',
+              sessionId,
+              connectionId,
+              error: welcomeError.message,
+              timestamp: new Date().toISOString()
+            }));
+            // Continue anyway - not critical
+          }
+        }
+
       } catch (err) {
         console.log(JSON.stringify({
-          level: 'WARN',
-          message: 'Session validation skipped - table query failed',
+          level: 'ERROR',
+          message: 'Session creation/update failed',
           connectionId,
           sessionId,
           error: err.message,
           timestamp: new Date().toISOString()
         }));
-        // Continue connection even if validation fails (graceful degradation)
+        return { statusCode: 500, body: 'Failed to create/update session' };
       }
 
       // Store connection with sessionId
@@ -669,6 +813,53 @@ exports.handler = async (event) => {
     }
 
     if (routeKey === '$disconnect') {
+      // Get connection details to find associated sessionId
+      let associatedSessionId;
+      try {
+        const connection = await docClient.send(new GetCommand({
+          TableName: CONNECTIONS_TABLE,
+          Key: { connectionId }
+        }));
+        associatedSessionId = connection.Item?.sessionId;
+      } catch (err) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'Failed to get connection details',
+          connectionId,
+          error: err.message
+        }));
+      }
+
+      // Mark session as disconnected (can be resumed later)
+      if (associatedSessionId) {
+        try {
+          await docClient.send(new UpdateCommand({
+            TableName: SESSIONS_TABLE,
+            Key: { session_id: associatedSessionId },
+            UpdateExpression: 'SET #status = :status, updated_at = :now',
+            ExpressionAttributeNames: { '#status': 'status' },
+            ExpressionAttributeValues: {
+              ':status': 'disconnected',
+              ':now': Math.floor(Date.now() / 1000)
+            }
+          }));
+
+          console.log(JSON.stringify({
+            level: 'INFO',
+            message: 'Marked session as disconnected',
+            sessionId: associatedSessionId,
+            connectionId
+          }));
+        } catch (err) {
+          console.log(JSON.stringify({
+            level: 'ERROR',
+            message: 'Failed to mark session as disconnected',
+            sessionId: associatedSessionId,
+            error: err.message
+          }));
+        }
+      }
+
       // Remove connection
       await docClient.send(new DeleteCommand({
         TableName: CONNECTIONS_TABLE,
@@ -679,6 +870,7 @@ exports.handler = async (event) => {
         level: 'INFO',
         message: 'Connection closed',
         connectionId,
+        sessionId: associatedSessionId,
         timestamp: new Date().toISOString()
       }));
 
@@ -706,17 +898,29 @@ exports.handler = async (event) => {
 };
 			`),
 			timeout: cdk.Duration.seconds(30),
-			memorySize: 256,
+			memorySize: 512, // Increased for SageMaker invocation
 			tracing: lambda.Tracing.ACTIVE,
 			environment: {
 				CONNECTIONS_TABLE: coachingSessionsTable.tableName,
-				SESSIONS_TABLE: coachingSessionsTable.tableName // Using same table with different keys
+				SESSIONS_TABLE: coachingSessionsTable.tableName, // Using same table with different keys
+				VOICE_BUCKET: voicesBucket.bucketName,
+				SAGEMAKER_ENDPOINT: endpoint.endpointName!,
+				WS_API_ENDPOINT: '' // Will be set after WebSocket API is created
 			},
 			logRetention: logs.RetentionDays.ONE_WEEK
 		});
 
 		// Grant WebSocket handler permissions
 		coachingSessionsTable.grantReadWriteData(wsConnectionHandler);
+		voicesBucket.grantReadWrite(wsConnectionHandler);
+		wsConnectionHandler.addToRolePolicy(
+			new iam.PolicyStatement({
+				actions: ['sagemaker:InvokeEndpoint'],
+				resources: [
+					`arn:aws:sagemaker:${this.region}:${this.account}:endpoint/${endpoint.endpointName!}`
+				]
+			})
+		);
 
 		// WebSocket API Gateway
 		const wsApi = new apigatewayv2.CfnApi(this, 'CoachingWebSocketApi', {
@@ -734,6 +938,7 @@ exports.handler = async (event) => {
 		});
 
 		// WebSocket Routes
+		const wsRoutes: apigatewayv2.CfnRoute[] = [];
 		['$connect', '$disconnect', '$default'].forEach((routeKey) => {
 			const route = new apigatewayv2.CfnRoute(this, `WSRoute${routeKey}`, {
 				apiId: wsApi.ref,
@@ -741,12 +946,15 @@ exports.handler = async (event) => {
 				target: `integrations/${wsIntegration.ref}`
 			});
 			route.addDependency(wsIntegration);
+			wsRoutes.push(route);
 		});
 
-		// WebSocket Deployment
+		// WebSocket Deployment (must wait for all routes to be created)
 		const wsDeployment = new apigatewayv2.CfnDeployment(this, 'WSDeployment', {
 			apiId: wsApi.ref
 		});
+		// Add dependencies on all routes
+		wsRoutes.forEach(route => wsDeployment.addDependency(route));
 
 		// WebSocket Stage
 		const wsStage = new apigatewayv2.CfnStage(this, 'WSStage', {
@@ -760,11 +968,23 @@ exports.handler = async (event) => {
 		// Grant WebSocket invoke permissions
 		wsConnectionHandler.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
 
+		// Construct WebSocket endpoint URL
+		const websocketEndpoint = `https://${wsApi.ref}.execute-api.${this.region}.amazonaws.com/${wsStage.stageName}`;
+
+		// Update WebSocket handler with the API endpoint for PostToConnection
+		wsConnectionHandler.addEnvironment('WS_API_ENDPOINT', websocketEndpoint);
+
+		// Grant execute-api permissions for posting to connections
+		wsConnectionHandler.addToRolePolicy(
+			new iam.PolicyStatement({
+				actions: ['execute-api:ManageConnections'],
+				resources: [`arn:aws:execute-api:${this.region}:${this.account}:${wsApi.ref}/${wsStage.stageName}/*`]
+			})
+		);
+
 		// ===================================
 		// Bedrock Coaching Agent Infrastructure
 		// ===================================
-
-		const websocketEndpoint = `https://${wsApi.ref}.execute-api.${this.region}.amazonaws.com/${wsStage.stageName}`;
 
 		const bedrockCoaching = new BedrockCoachingConstruct(this, 'BedrockCoaching', {
 			matchDataBucket,
@@ -774,12 +994,18 @@ exports.handler = async (event) => {
 			websocketEndpoint
 		});
 
-		// Update aggregate-stats Lambda to invoke orchestrator
+		// Update aggregate-stats Lambda to invoke orchestrator and query sessions
 		aggregateStatsFunction.addEnvironment(
 			'COACHING_AGENT_FUNCTION',
 			bedrockCoaching.orchestratorFunction.functionName
 		);
+		aggregateStatsFunction.addEnvironment(
+			'COACHING_SESSIONS_TABLE',
+			coachingSessionsTable.tableName
+		);
 		bedrockCoaching.orchestratorFunction.grantInvoke(aggregateStatsFunction);
+		// Grant read access to coaching sessions table for session detection
+		coachingSessionsTable.grantReadData(aggregateStatsFunction);
 
 		// ===================================
 		// CloudWatch Alarms (Production Monitoring)

@@ -107,9 +107,15 @@ export class BedrockCoachingConstruct extends Construct {
 			})
 		);
 
-		// Create function URL for action group callback
-		const functionUrl = this.actionHandlerFunction.addFunctionUrl({
-			authType: lambda.FunctionUrlAuthType.AWS_IAM
+		// CRITICAL: Add Lambda resource-based permission BEFORE agent creation
+		// Bedrock validates Lambda access during agent creation, not after
+		// Using wildcard ARN pattern since agent ARN doesn't exist yet
+		// MUST include both sourceArn AND sourceAccount conditions (AWS security best practice)
+		this.actionHandlerFunction.addPermission('AllowBedrockAgentInvoke', {
+			principal: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+			action: 'lambda:InvokeFunction',
+			sourceArn: `arn:aws:bedrock:${region}:${account}:agent/*`,
+			sourceAccount: account
 		});
 
 		// ===================================
@@ -117,16 +123,43 @@ export class BedrockCoachingConstruct extends Construct {
 		// ===================================
 
 		const agentRole = new iam.Role(this, 'AgentRole', {
-			assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+			assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com', {
+				conditions: {
+					StringEquals: {
+						'aws:SourceAccount': account
+					},
+					ArnLike: {
+						'aws:SourceArn': `arn:aws:bedrock:${region}:${account}:agent/*`
+					}
+				}
+			}),
 			description: 'Execution role for Champion Recap coaching agent'
 		});
 
 		// Allow agent to invoke foundation model
+		// Using Amazon Nova Lite (ACTIVE lifecycle, AWS native model designed for agents)
+		// Note: Anthropic Haiku 4.5 only supports INFERENCE_PROFILE mode (incompatible with agents)
+		// Note: Anthropic Claude 3.5 Sonnet has LEGACY lifecycle status (stabilization failures)
+		// Note: Anthropic Claude 3 Haiku still failed stabilization despite ACTIVE status
 		agentRole.addToPolicy(
 			new iam.PolicyStatement({
 				actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
 				resources: [
-					`arn:aws:bedrock:${region}::foundation-model/us.anthropic.claude-3-5-haiku-20241022-v1:0`
+					// Amazon Nova Lite foundation model in us-east-1 (ACTIVE lifecycle, AWS native)
+					`arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0`
+				]
+			})
+		);
+
+		// Allow agent to get inference profile metadata
+		agentRole.addToPolicy(
+			new iam.PolicyStatement({
+				actions: [
+					'bedrock:GetInferenceProfile',
+					'bedrock:ListInferenceProfiles'
+				],
+				resources: [
+					`arn:aws:bedrock:${region}:${account}:inference-profile/*`
 				]
 			})
 		);
@@ -140,59 +173,7 @@ export class BedrockCoachingConstruct extends Construct {
 		);
 
 		// ===================================
-		// Bedrock Agent
-		// ===================================
-
-		const personalityDescriptions = Object.entries(CHAMPION_PERSONALITIES)
-			.map(([champ, desc]) => `- ${champ}: ${desc}`)
-			.join('\n');
-
-		this.agent = new bedrock.CfnAgent(this, 'CoachingAgent', {
-			agentName: 'champion-recap-coaching-agent',
-			agentResourceRoleArn: agentRole.roleArn,
-			foundationModel: 'us.anthropic.claude-3-5-haiku-20241022-v1:0',
-			instruction: `You are an adaptive League of Legends coach analyzing a player's match history.
-
-Your personality changes based on sessionAttributes.championPersonality:
-${personalityDescriptions}
-
-Coaching Guidelines:
-1. Analyze matches incrementally as they stream in
-2. Build context about player's patterns across matches
-3. Provide SHORT observations (20-30 words) when you detect patterns
-4. Save comprehensive feedback for the final conclusion (80-100 words)
-
-When analyzing:
-- Track KDA trends, CS/min patterns, vision scores
-- Identify recurring mistakes (positioning, overextending, poor vision)
-- Recognize strengths (mechanics, decision-making, consistency)
-- Detect champion-specific performance variations
-
-Call actions strategically:
-- streamMatchData: Record each match (you'll call this for every match)
-- detectPattern: When you notice a trend across 3+ matches
-- generateQuickRemark: When you spot a clear pattern worth mentioning (2-3 times max)
-- generateConcludingRemark: At the end with overall assessment
-
-Be in character! Use phrases and tone matching your champion personality.`,
-
-			description: 'AI coaching agent for League of Legends match analysis',
-
-			// Enable session memory to remember all matches in the session
-			memoryConfiguration: {
-				enabledMemoryTypes: ['SESSION_SUMMARY'],
-				storageDays: 1 // Sessions last up to 1 day
-			},
-
-			// Idle timeout - 8 minutes max for analysis
-			idleSessionTtlInSeconds: 480,
-
-			// Action groups will be added after agent creation
-			actionGroups: []
-		});
-
-		// ===================================
-		// Action Groups
+		// Action Groups (MUST be defined BEFORE agent creation)
 		// ===================================
 
 		// Action Group 1: Stream Match Data
@@ -207,7 +188,7 @@ Be in character! Use phrases and tone matching your champion personality.`,
 					{
 						name: 'streamMatchData',
 						description:
-							'Record a match in session memory. Call this for EVERY match you receive.',
+							'Record a match in session memory. Call this for EVERY match you receive. AWS Bedrock limit: max 5 parameters per function.',
 						parameters: {
 							matchNumber: {
 								type: 'integer',
@@ -219,54 +200,20 @@ Be in character! Use phrases and tone matching your champion personality.`,
 								description: 'Total number of matches to analyze',
 								required: true
 							},
+							matchSummary: {
+								type: 'string',
+								description:
+									'JSON string containing all match details: championName, kda, kills, deaths, assists, cs, csPerMin, visionScore, win, position, and other stats',
+								required: true
+							},
 							championName: {
 								type: 'string',
-								description: 'Champion played this match',
+								description: 'Champion played this match (for quick reference)',
 								required: true
 							},
-							kda: {
+							result: {
 								type: 'string',
-								description: 'KDA ratio as string (e.g., "5.2")',
-								required: true
-							},
-							kills: {
-								type: 'integer',
-								description: 'Number of kills',
-								required: true
-							},
-							deaths: {
-								type: 'integer',
-								description: 'Number of deaths',
-								required: true
-							},
-							assists: {
-								type: 'integer',
-								description: 'Number of assists',
-								required: true
-							},
-							cs: {
-								type: 'integer',
-								description: 'Total minions killed',
-								required: true
-							},
-							csPerMin: {
-								type: 'number',
-								description: 'CS per minute',
-								required: true
-							},
-							visionScore: {
-								type: 'integer',
-								description: 'Vision score',
-								required: true
-							},
-							win: {
-								type: 'boolean',
-								description: 'Match result (true = win, false = loss)',
-								required: true
-							},
-							position: {
-								type: 'string',
-								description: 'Lane position (TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY)',
+								description: 'Match result: "win" or "loss"',
 								required: true
 							}
 						}
@@ -389,15 +336,78 @@ Be in character! Use phrases and tone matching your champion personality.`,
 			}
 		};
 
-		// Add all action groups to agent
-		// Note: This must be done after agent creation using L1 construct
-		// We'll update the agent with action groups
-		this.agent.actionGroups = [
-			streamMatchDataAction,
-			detectPatternAction,
-			quickRemarkAction,
-			concludingRemarkAction
-		];
+		// ===================================
+		// Bedrock Agent
+		// ===================================
+
+		const personalityDescriptions = Object.entries(CHAMPION_PERSONALITIES)
+			.map(([champ, desc]) => `- ${champ}: ${desc}`)
+			.join('\n');
+
+		this.agent = new bedrock.CfnAgent(this, 'CoachingAgent', {
+			agentName: 'champion-recap-coaching-agent',
+			agentResourceRoleArn: agentRole.roleArn,
+			foundationModel: 'amazon.nova-lite-v1:0',
+
+			// CRITICAL: Disable auto-prepare to prevent premature validation
+			// We manually prepare via custom resource AFTER all dependencies are ready
+			autoPrepare: false,
+
+			// Allow easier cleanup during testing/debugging
+			skipResourceInUseCheckOnDelete: true,
+
+			instruction: `You are an adaptive League of Legends coach analyzing a player's match history.
+
+Your personality changes based on sessionAttributes.championPersonality:
+${personalityDescriptions}
+
+Coaching Guidelines:
+1. Analyze matches incrementally as they stream in
+2. Build context about player's patterns across matches
+3. Provide SHORT observations (20-30 words) when you detect patterns
+4. Save comprehensive feedback for the final conclusion (80-100 words)
+
+When analyzing:
+- Track KDA trends, CS/min patterns, vision scores
+- Identify recurring mistakes (positioning, overextending, poor vision)
+- Recognize strengths (mechanics, decision-making, consistency)
+- Detect champion-specific performance variations
+
+Call actions strategically:
+- streamMatchData: Record each match (call for EVERY match). Create a JSON string with all match data for the matchSummary parameter.
+- detectPattern: When you notice a trend across 3+ matches
+- generateQuickRemark: When you spot a clear pattern worth mentioning (2-3 times max)
+- generateConcludingRemark: At the end with overall assessment
+
+Note: streamMatchData accepts a matchSummary JSON string containing all stats. Extract key data from the match description and format as JSON.
+
+Be in character! Use phrases and tone matching your champion personality.`,
+
+			description: 'AI coaching agent for League of Legends match analysis',
+
+			// Enable session memory to remember all matches in the session
+			memoryConfiguration: {
+				enabledMemoryTypes: ['SESSION_SUMMARY'],
+				storageDays: 1 // Sessions last up to 1 day
+			},
+
+			// Idle timeout - 8 minutes max for analysis
+			idleSessionTtlInSeconds: 480,
+
+			// CRITICAL: Include all action groups at creation time
+			// CloudFormation L1 constructs don't support property mutations after creation
+			actionGroups: [
+				streamMatchDataAction,
+				detectPatternAction,
+				quickRemarkAction,
+				concludingRemarkAction
+			]
+		});
+
+		// CRITICAL: Ensure agent is created AFTER all dependencies are ready
+		// This prevents CloudFormation from trying to validate the agent before Lambda permission exists
+		this.agent.node.addDependency(this.actionHandlerFunction);
+		this.agent.node.addDependency(agentRole);
 
 		// ===================================
 		// Agent Alias
@@ -455,13 +465,6 @@ def handler(event, context):
 
 		prepareAgent.node.addDependency(this.agent);
 		this.agentAlias.node.addDependency(prepareAgent);
-
-		// Add resource-based policy to allow Bedrock Agent to invoke action handler via Function URL
-		this.actionHandlerFunction.addPermission('AllowBedrockAgentInvoke', {
-			principal: new iam.ServicePrincipal('bedrock.amazonaws.com'),
-			action: 'lambda:InvokeFunctionUrl',
-			sourceArn: this.agent.attrAgentArn
-		});
 
 		// ===================================
 		// Orchestrator Lambda
